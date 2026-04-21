@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Shadowfax | Cluster Optimizer</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800;900&amp;family=Plus+Jakarta+Sans:wght@400;500;600;700&amp;family=Inter:wght@400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "surface-container-high": "#eae8e7",
+                        "primary": "#006955",
+                        "outline-variant": "#bdc9c3",
+                        "primary-fixed-dim": "#6fd9bc",
+                        "primary-container": "#00846c",
+                        "tertiary": "#555c67",
+                        "primary-fixed": "#8cf6d8",
+                        "error-container": "#ffdad6",
+                        "on-primary-fixed-variant": "#005141",
+                        "surface-container-highest": "#e4e2e2",
+                        "surface-container-lowest": "#ffffff",
+                        "on-primary-fixed": "#002019",
+                        "on-secondary-container": "#676600",
+                        "error": "#ba1a1a",
+                        "on-error": "#ffffff",
+                        "on-tertiary-fixed": "#151c25",
+                        "tertiary-container": "#6e7580",
+                        "on-surface-variant": "#3d4945",
+                        "tertiary-fixed": "#dce3f0",
+                        "secondary-container": "#e9e609",
+                        "inverse-surface": "#303030",
+                        "secondary-fixed": "#ece911",
+                        "on-background": "#1b1c1c",
+                        "on-error-container": "#93000a",
+                        "surface-tint": "#006b57",
+                        "tertiary-fixed-dim": "#c0c7d3",
+                        "on-secondary-fixed": "#1d1d00",
+                        "surface": "#fbf9f8",
+                        "on-tertiary": "#ffffff",
+                        "on-tertiary-container": "#fdfcff",
+                        "on-secondary": "#ffffff",
+                        "secondary-fixed-dim": "#cfcc00",
+                        "surface-container": "#efeded",
+                        "on-primary": "#ffffff",
+                        "background": "#fbf9f8",
+                        "surface-bright": "#fbf9f8",
+                        "inverse-on-surface": "#f2f0f0",
+                        "on-secondary-fixed-variant": "#4a4900",
+                        "secondary": "#636100",
+                        "on-tertiary-fixed-variant": "#404751",
+                        "on-primary-container": "#f4fff9",
+                        "outline": "#6d7a75",
+                        "surface-dim": "#dbdad9",
+                        "surface-variant": "#e4e2e2",
+                        "surface-container-low": "#f5f3f3",
+                        "inverse-primary": "#6fd9bc",
+                        "on-surface": "#1b1c1c"
+                    },
+                    borderRadius: {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    },
+                    fontFamily: {
+                        "headline": ["Montserrat", "Plus Jakarta Sans"],
+                        "body": ["Inter"],
+                        "label": ["Montserrat", "Inter"]
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        body { font-family: 'Inter', sans-serif; }
+        .font-montserrat { font-family: 'Montserrat', sans-serif; }
+        .no-scrollbar::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body class="bg-background text-on-background min-h-screen">
+<!-- SideNavBar Shell -->
+<aside class="w-[280px] h-screen fixed left-0 top-0 overflow-y-auto bg-stone-100 dark:bg-stone-900 border-none flex flex-col p-6 gap-8 z-50">
+<div class="flex items-center gap-3">
+<span class="text-2xl font-bold tracking-tighter text-[#008A71] dark:text-[#6fd9bc] font-montserrat">Shadowfax</span>
+</div>
+<div class="flex flex-col gap-6">
+<!-- Connection Status -->
+<div class="flex items-center justify-between p-3 rounded-lg bg-white/50 dark:bg-stone-800/50">
+<span class="text-xs font-semibold text-stone-500 uppercase tracking-wider">Status</span>
+<span class="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700 text-[10px] font-bold">
+<span class="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                    BigQuery Connected
+                </span>
+</div>
+<!-- Main Navigation Navigation Labels from JSON -->
+<nav class="flex flex-col gap-2">
+<a class="flex items-center gap-3 p-3 rounded-lg hover:bg-stone-200 dark:hover:bg-stone-800 transition-colors duration-200 text-[#008A71] dark:text-[#6fd9bc] font-bold font-montserrat text-sm tracking-tight" href="#">
+<span class="material-symbols-outlined" data-icon="map">map</span>
+                    Map
+                </a>
+<a class="flex items-center gap-3 p-3 rounded-lg hover:bg-stone-200 dark:hover:bg-stone-800 transition-colors duration-200 text-stone-500 dark:text-stone-400 font-medium font-montserrat text-sm tracking-tight" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+                    CPO Dashboard
+                </a>
+<a class="flex items-center gap-3 p-3 rounded-lg hover:bg-stone-200 dark:hover:bg-stone-800 transition-colors duration-200 text-stone-500 dark:text-stone-400 font-medium font-montserrat text-sm tracking-tight" href="#">
+<span class="material-symbols-outlined" data-icon="bolt">bolt</span>
+                    Recommendations
+                </a>
+<a class="flex items-center gap-3 p-3 rounded-lg hover:bg-stone-200 dark:hover:bg-stone-800 transition-colors duration-200 text-stone-500 dark:text-stone-400 font-medium font-montserrat text-sm tracking-tight" href="#">
+<span class="material-symbols-outlined" data-icon="database">database</span>
+                    Data
+                </a>
+</nav>
+<div class="h-px bg-stone-200 dark:bg-stone-800 mx-1"></div>
+<!-- Filters Section (Contextual for Map) -->
+<div class="flex flex-col gap-4">
+<h3 class="text-xs font-bold text-stone-400 uppercase tracking-widest px-1">Filters</h3>
+<div class="space-y-1">
+<label class="text-[11px] font-semibold text-stone-500 px-1">Hub Category</label>
+<div class="relative">
+<select class="w-full appearance-none bg-white dark:bg-stone-800 border-none rounded-lg py-2.5 px-3 text-sm focus:ring-2 focus:ring-[#008A71] transition-all">
+<option>All Categories</option>
+<option>Hyperlocal</option>
+<option>Last Mile</option>
+</select>
+<span class="material-symbols-outlined absolute right-3 top-2.5 text-stone-400 pointer-events-none">expand_more</span>
+</div>
+</div>
+<div class="space-y-1">
+<label class="text-[11px] font-semibold text-stone-500 px-1">Hub Name</label>
+<div class="relative">
+<select class="w-full appearance-none bg-white dark:bg-stone-800 border-none rounded-lg py-2.5 px-3 text-sm focus:ring-2 focus:ring-[#008A71] transition-all">
+<option>Select Hub</option>
+<option>Gurgaon_Main_01</option>
+<option>Bangalore_HSR_02</option>
+</select>
+<span class="material-symbols-outlined absolute right-3 top-2.5 text-stone-400 pointer-events-none">expand_more</span>
+</div>
+</div>
+</div>
+<!-- File Upload -->
+<div class="flex flex-col gap-2">
+<label class="text-[11px] font-bold text-stone-400 uppercase tracking-widest px-1">External Data</label>
+<div class="border-2 border-dashed border-stone-200 dark:border-stone-800 rounded-lg p-4 flex flex-col items-center justify-center gap-2 hover:bg-stone-50 transition-colors cursor-pointer group">
+<span class="material-symbols-outlined text-stone-300 group-hover:text-[#008A71] transition-colors">upload_file</span>
+<span class="text-[11px] text-stone-500 text-center">Upload Excel / CSV</span>
+</div>
+</div>
+</div>
+<!-- Sidebar Footer -->
+<div class="mt-auto flex flex-col gap-2">
+<button class="w-full bg-gradient-to-br from-primary to-primary-container text-white py-3 rounded-lg font-montserrat font-bold text-sm shadow-md hover:opacity-90 active:scale-95 transition-all">
+                Run Optimizer
+            </button>
+<div class="flex flex-col gap-1 mt-4">
+<a class="flex items-center gap-3 p-2 rounded-lg text-stone-500 text-sm font-medium hover:bg-stone-200 transition-colors" href="#">
+<span class="material-symbols-outlined text-sm" data-icon="settings">settings</span>
+                    Settings
+                </a>
+<a class="flex items-center gap-3 p-2 rounded-lg text-stone-500 text-sm font-medium hover:bg-stone-200 transition-colors" href="#">
+<span class="material-symbols-outlined text-sm" data-icon="help">help</span>
+                    Support
+                </a>
+</div>
+</div>
+</aside>
+<!-- Main Content Canvas -->
+<main class="ml-[280px] min-h-screen">
+<!-- Header Banner -->
+<header class="h-24 bg-gradient-to-r from-[#008A71] to-[#006C68] flex items-center px-8 relative overflow-hidden">
+<!-- Decorative overlay -->
+<div class="absolute inset-0 opacity-10 pointer-events-none">
+<svg height="100%" preserveaspectratio="none" viewbox="0 0 100 100" width="100%">
+<path d="M0 100 L100 0 L100 100 Z" fill="white"></path>
+</svg>
+</div>
+<div class="relative z-10 flex flex-col">
+<h1 class="text-white text-2xl font-black font-montserrat tracking-tight">Cluster Optimizer</h1>
+<p class="text-white/80 text-xs font-medium tracking-wide">SHADOWFAX LOGISTICS INTELLIGENCE UNIT</p>
+</div>
+<div class="ml-auto flex items-center gap-4 relative z-10">
+<div class="flex items-center gap-2 bg-white/10 backdrop-blur-md px-4 py-2 rounded-full text-white border border-white/20">
+<span class="material-symbols-outlined text-sm" data-icon="notifications">notifications</span>
+<div class="w-2 h-2 bg-secondary rounded-full"></div>
+</div>
+<div class="w-10 h-10 rounded-full border-2 border-white/30 overflow-hidden bg-stone-100">
+<img alt="Shadowfax User Avatar" data-alt="minimalist 3d avatar of a professional logistics manager with short dark hair wearing a tech vest in a soft studio lighting" src="https://lh3.googleusercontent.com/aida-public/AB6AXuD3RXdUF_ao0P8AgKRv9nF85iRVnDu2-gB3UFtTGX7t5cxyoJ-Nbuyv2KcPUOi3oFO1Q44FwRzAtmNTdP-nlZLnGqdOmd03my5wfCRurvjGrCvmy6e0rG-gfhYRYmPHFP2gBBY1uJ8_Lc4aCQePnKihdiRywf5ioqStvile8Ii2XpFzGcfPuGi8jNybYCT3Ra6AONOiz_fVHIqlOKBRG0_l2oN5cO2dyjj8CXSJopVVZWSNIijt1h5s7jRZUnkmmZ6Ooij0SgJ5GU0"/>
+</div>
+</div>
+</header>
+<!-- Tab Navigation (TopNavBar Implementation) -->
+<nav class="bg-white/80 backdrop-blur-xl border-b border-stone-200/50 flex items-center px-8 h-14 sticky top-0 z-40">
+<div class="flex gap-8">
+<a class="h-14 flex items-center text-[#008A71] border-b-2 border-[#008A71] text-sm font-bold font-montserrat" href="#">Map</a>
+<a class="h-14 flex items-center text-stone-500 hover:text-[#008A71] text-sm font-medium transition-colors font-montserrat" href="#">CPO Dashboard</a>
+<a class="h-14 flex items-center text-stone-500 hover:text-[#008A71] text-sm font-medium transition-colors font-montserrat" href="#">Recommendations</a>
+<a class="h-14 flex items-center text-stone-500 hover:text-[#008A71] text-sm font-medium transition-colors font-montserrat" href="#">Data</a>
+</div>
+<div class="ml-auto flex items-center gap-4">
+<div class="relative flex items-center">
+<span class="material-symbols-outlined absolute left-3 text-stone-400 text-sm">search</span>
+<input class="pl-10 pr-4 py-1.5 bg-stone-100 border-none rounded-full text-xs w-64 focus:ring-2 focus:ring-[#008A71] transition-all" placeholder="Search by Pincode or Hub..." type="text"/>
+</div>
+</div>
+</nav>
+<!-- Dashboard Content -->
+<section class="p-8 space-y-8">
+<!-- Map Section -->
+<div class="flex flex-col gap-6">
+<div class="flex items-end justify-between">
+<div class="space-y-1">
+<h2 class="text-xl font-bold font-montserrat text-stone-900">Network Distribution Map</h2>
+<p class="text-sm text-stone-500">Visualizing real-time capacity and cluster efficiency.</p>
+</div>
+<!-- Map Controls -->
+<div class="flex items-center gap-6 bg-white p-2 rounded-xl shadow-sm border border-stone-100">
+<div class="flex gap-1 bg-stone-100 p-1 rounded-lg">
+<button class="px-4 py-1.5 rounded-md text-xs font-bold bg-white text-[#008A71] shadow-sm">Surge Rate</button>
+<button class="px-4 py-1.5 rounded-md text-xs font-semibold text-stone-500 hover:bg-stone-50">Pincode</button>
+</div>
+<div class="h-6 w-px bg-stone-200"></div>
+<label class="flex items-center gap-2 cursor-pointer group">
+<div class="relative">
+<input checked="" class="sr-only peer" type="checkbox"/>
+<div class="w-8 h-4 bg-stone-200 rounded-full peer peer-checked:bg-primary transition-colors"></div>
+<div class="absolute left-1 top-1 bg-white w-2 h-2 rounded-full peer-checked:translate-x-4 transition-transform"></div>
+</div>
+<span class="text-xs font-semibold text-stone-600 group-hover:text-primary transition-colors">Show Heatmap</span>
+</label>
+</div>
+</div>
+<!-- Main Map Placeholder -->
+<div class="relative w-full h-[620px] rounded-2xl overflow-hidden bg-stone-200/50 group">
+<div class="absolute inset-0 bg-cover bg-center" data-alt="highly detailed topographic navigation map of a major indian city like Mumbai or Delhi with tech-style neon teal and emerald logistics pins and cluster data overlays" data-location="Mumbai, India" style="background-image: url('https://lh3.googleusercontent.com/aida-public/AB6AXuAGV4VeLmfoYA3sjwXX_nlQgo8YsekGk2x7BlUKyLGGHx96CW_GkI4QMjEeHVvGk-hpbQDVmSQzhqHWWs263b4fH7hcNw1MzF1OZW_5_HIgFOR7CSP5xlKOpjKdpPWE0D3R8GGfPbxxOP8MVRgHwMXEMh4_aVbJX6EUQQmYEo_XelMdLDs_ugVad1sQKKX8ziCsOQqid1HTNSct9WHRtFY1pxlqM4mSPvYznI8QgqpxRZljVExabd-vfQa1s_QTNuxDZtO7Fn3iYZA')"></div>
+<!-- Floating Map Overlay -->
+<div class="absolute top-6 left-6 flex flex-col gap-2">
+<div class="bg-white/90 backdrop-blur-md p-4 rounded-xl shadow-xl border border-white/50 w-64 space-y-4">
+<div class="flex justify-between items-center">
+<span class="text-[10px] font-black uppercase text-stone-400 tracking-widest">Active Cluster</span>
+<span class="px-2 py-0.5 bg-primary/10 text-primary text-[10px] font-bold rounded">Optimal</span>
+</div>
+<div>
+<h4 class="text-sm font-bold text-stone-900">West Mumbai Hub Group</h4>
+<p class="text-[11px] text-stone-500">Coverage: 12 Pincodes</p>
+</div>
+<div class="space-y-2">
+<div class="flex justify-between text-[11px] font-semibold">
+<span class="text-stone-500">Utilization</span>
+<span class="text-primary">88%</span>
+</div>
+<div class="w-full bg-stone-100 h-1.5 rounded-full overflow-hidden">
+<div class="bg-primary h-full w-[88%] rounded-full"></div>
+</div>
+</div>
+</div>
+</div>
+<!-- Map Legend -->
+<div class="absolute bottom-6 right-6">
+<div class="bg-white/90 backdrop-blur-md p-3 rounded-lg shadow-lg border border-white/50 flex flex-col gap-2">
+<div class="flex items-center gap-2 text-[10px] font-bold text-stone-600">
+<span class="w-2.5 h-2.5 rounded-full bg-emerald-500"></span>
+                                High Efficiency
+                            </div>
+<div class="flex items-center gap-2 text-[10px] font-bold text-stone-600">
+<span class="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                                Moderate Surge
+                            </div>
+<div class="flex items-center gap-2 text-[10px] font-bold text-stone-600">
+<span class="w-2.5 h-2.5 rounded-full bg-red-500"></span>
+                                Action Required
+                            </div>
+</div>
+</div>
+</div>
+</div>
+<!-- Bento Stats Grid -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+<!-- Stat Card -->
+<div class="bg-surface-container-lowest p-6 rounded-xl shadow-sm border border-stone-50 flex flex-col gap-4">
+<span class="text-[10px] font-black uppercase text-stone-400 tracking-widest">Total Fleet</span>
+<div class="flex items-baseline gap-2">
+<span class="text-3xl font-black font-montserrat text-stone-900">4,820</span>
+<span class="text-emerald-500 text-xs font-bold flex items-center">
+<span class="material-symbols-outlined text-sm">trending_up</span>
+                            12%
+                        </span>
+</div>
+<div class="h-8 w-full">
+<!-- Tiny Sparkline placeholder using CSS -->
+<div class="flex items-end h-full gap-1">
+<div class="bg-primary/20 w-full h-1/2 rounded-t-sm"></div>
+<div class="bg-primary/20 w-full h-3/4 rounded-t-sm"></div>
+<div class="bg-primary/20 w-full h-2/3 rounded-t-sm"></div>
+<div class="bg-primary/40 w-full h-4/5 rounded-t-sm"></div>
+<div class="bg-primary w-full h-full rounded-t-sm"></div>
+</div>
+</div>
+</div>
+<div class="bg-surface-container-lowest p-6 rounded-xl shadow-sm border border-stone-50 flex flex-col gap-4">
+<span class="text-[10px] font-black uppercase text-stone-400 tracking-widest">Efficiency Index</span>
+<div class="flex items-baseline gap-2">
+<span class="text-3xl font-black font-montserrat text-stone-900">0.94</span>
+<span class="text-stone-400 text-xs font-medium">Global: 0.88</span>
+</div>
+<div class="flex gap-1">
+<div class="h-1 flex-1 bg-primary rounded-full"></div>
+<div class="h-1 flex-1 bg-primary rounded-full"></div>
+<div class="h-1 flex-1 bg-primary rounded-full"></div>
+<div class="h-1 flex-1 bg-stone-100 rounded-full"></div>
+</div>
+</div>
+<div class="bg-surface-container-lowest p-6 rounded-xl shadow-sm border border-stone-50 flex flex-col gap-4">
+<span class="text-[10px] font-black uppercase text-stone-400 tracking-widest">Surge Pincodes</span>
+<div class="flex items-baseline gap-2">
+<span class="text-3xl font-black font-montserrat text-stone-900">24</span>
+<span class="text-red-500 text-xs font-bold flex items-center">
+<span class="material-symbols-outlined text-sm">priority_high</span>
+</span>
+</div>
+<p class="text-[11px] text-stone-500 font-medium">Requires immediate cluster re-allocation.</p>
+</div>
+<div class="bg-primary text-white p-6 rounded-xl shadow-lg flex flex-col justify-between">
+<div>
+<span class="text-[10px] font-black uppercase text-white/60 tracking-widest">Recommendation</span>
+<h4 class="text-sm font-bold mt-2">Active Cluster Balance</h4>
+</div>
+<button class="w-full bg-white text-primary py-2 rounded-lg text-xs font-bold hover:bg-stone-100 transition-colors">
+                        Apply All Optimizations
+                    </button>
+</div>
+</div>
+<!-- Data Table / List -->
+<div class="bg-white rounded-2xl shadow-sm border border-stone-100 overflow-hidden">
+<div class="px-8 py-6 border-b border-stone-50 flex justify-between items-center">
+<h3 class="font-bold font-montserrat text-stone-900">Hub Efficiency Rankings</h3>
+<button class="text-xs font-bold text-primary flex items-center gap-1">
+                        View Detailed Report
+                        <span class="material-symbols-outlined text-sm">chevron_right</span>
+</button>
+</div>
+<div class="overflow-x-auto">
+<table class="w-full text-left">
+<thead>
+<tr class="bg-stone-50 text-[10px] font-black uppercase text-stone-400 tracking-widest">
+<th class="px-8 py-4">Hub Detail</th>
+<th class="px-8 py-4">Volume</th>
+<th class="px-8 py-4">SLA Compliance</th>
+<th class="px-8 py-4 text-right">Trend</th>
+</tr>
+</thead>
+<tbody class="divide-y divide-stone-50">
+<tr class="hover:bg-stone-50 transition-colors">
+<td class="px-8 py-5">
+<div class="flex flex-col">
+<span class="text-sm font-bold text-stone-900">DL_Gurgaon_A1</span>
+<span class="text-[11px] text-stone-500">Sector 44, Gurgaon</span>
+</div>
+</td>
+<td class="px-8 py-5">
+<span class="text-sm font-medium text-stone-600">12,450 units</span>
+</td>
+<td class="px-8 py-5">
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-emerald-500"></div>
+<span class="text-sm font-bold text-stone-900">98.2%</span>
+</div>
+</td>
+<td class="px-8 py-5 text-right">
+<span class="material-symbols-outlined text-emerald-500">trending_up</span>
+</td>
+</tr>
+<tr class="hover:bg-stone-50 transition-colors">
+<td class="px-8 py-5">
+<div class="flex flex-col">
+<span class="text-sm font-bold text-stone-900">KA_Blr_East_04</span>
+<span class="text-[11px] text-stone-500">Whitefield, Bangalore</span>
+</div>
+</td>
+<td class="px-8 py-5">
+<span class="text-sm font-medium text-stone-600">9,820 units</span>
+</td>
+<td class="px-8 py-5">
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-amber-400"></div>
+<span class="text-sm font-bold text-stone-900">92.5%</span>
+</div>
+</td>
+<td class="px-8 py-5 text-right">
+<span class="material-symbols-outlined text-stone-400">trending_flat</span>
+</td>
+</tr>
+</tbody>
+</table>
+</div>
+</div>
+</section>
+</main>
+<!-- FAB Action (Suppressed on details, shown for optimization focus) -->
+<button class="fixed bottom-8 right-8 w-14 h-14 bg-primary text-white rounded-full shadow-2xl flex items-center justify-center hover:scale-110 active:scale-95 transition-all z-50">
+<span class="material-symbols-outlined" style="font-variation-settings: 'FILL' 1;">bolt</span>
+</button>
+</body></html>

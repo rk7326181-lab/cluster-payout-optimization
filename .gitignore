@@ -1,0 +1,101 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment variables
+.env
+.env.local
+
+# Credentials
+config/credentials.json
+*.json.key
+service_account.json
+
+# Large data files (>100MB GitHub limit) - upload via app sidebar after deploy
+*.xlsx
+*.geojson
+*.parquet
+Awb_with_polygon_mapping.csv
+data/
+awb_cache/
+hexbin_cache.json
+
+# Code review / auxiliary caches
+.code-review-graph/
+clustering_app*/
+__pycache__/
+
+# Temporary screenshots (Puppeteer diagnostics)
+temporary screenshots/
+temp_screenshots/
+
+# Node modules (Puppeteer dev-only, not needed for Streamlit deploy)
+node_modules/
+package-lock.json
+
+# Claude Code user state
+.claude/
+
+# Ad-hoc result dumps
+final_result_df.csv
+streamlit_log.txt
+
+# Logs
+*.log
+logs/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Distribution
+*.zip
+*.tar.gz
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# OS
+Thumbs.db

@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Login | Shadowfax Precision Navigator</title>
+<link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&amp;family=Plus+Jakarta+Sans:wght@600;700&amp;family=Inter:wght@400;500&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "surface-container-low": "#f5f3f3",
+                        "on-secondary-fixed": "#1d1d00",
+                        "primary-fixed-dim": "#6fd9bc",
+                        "on-surface-variant": "#3d4945",
+                        "error": "#ba1a1a",
+                        "inverse-on-surface": "#f2f0f0",
+                        "secondary-container": "#e9e609",
+                        "on-tertiary-container": "#fdfcff",
+                        "on-background": "#1b1c1c",
+                        "on-error": "#ffffff",
+                        "inverse-primary": "#6fd9bc",
+                        "on-secondary-fixed-variant": "#4a4900",
+                        "on-tertiary": "#ffffff",
+                        "on-tertiary-fixed-variant": "#404751",
+                        "surface-tint": "#006b57",
+                        "surface-bright": "#fbf9f8",
+                        "primary-fixed": "#8cf6d8",
+                        "on-surface": "#1b1c1c",
+                        "surface-container": "#efeded",
+                        "on-error-container": "#93000a",
+                        "error-container": "#ffdad6",
+                        "tertiary-fixed": "#dce3f0",
+                        "outline-variant": "#bdc9c3",
+                        "on-tertiary-fixed": "#151c25",
+                        "tertiary-fixed-dim": "#c0c7d3",
+                        "tertiary": "#555c67",
+                        "secondary-fixed": "#ece911",
+                        "on-secondary-container": "#676600",
+                        "on-primary-fixed-variant": "#005141",
+                        "surface": "#fbf9f8",
+                        "on-primary-fixed": "#002019",
+                        "inverse-surface": "#303030",
+                        "primary": "#006955",
+                        "secondary": "#636100",
+                        "surface-variant": "#e4e2e2",
+                        "on-primary": "#ffffff",
+                        "surface-container-lowest": "#ffffff",
+                        "primary-container": "#00846c",
+                        "background": "#fbf9f8",
+                        "outline": "#6d7a75",
+                        "on-secondary": "#ffffff",
+                        "tertiary-container": "#6e7580",
+                        "surface-dim": "#dbdad9",
+                        "surface-container-highest": "#e4e2e2",
+                        "surface-container-high": "#eae8e7",
+                        "on-primary-container": "#f4fff9",
+                        "secondary-fixed-dim": "#cfcc00"
+                    },
+                    "fontFamily": {
+                        "montserrat": ["Montserrat", "sans-serif"],
+                        "headline": ["Plus Jakarta Sans", "sans-serif"],
+                        "body": ["Inter", "sans-serif"],
+                        "label": ["Inter", "sans-serif"]
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.25rem",
+                        "lg": "0.5rem",
+                        "xl": "0.75rem",
+                        "full": "9999px"
+                    }
+                }
+            }
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+        }
+        .editorial-shadow {
+            box-shadow: 0px 12px 32px rgba(0, 107, 87, 0.06);
+        }
+        .signature-gradient {
+            background: linear-gradient(135deg, #008A71 0%, #00846c 100%);
+        }
+        .text- editorial-tight {
+            letter-spacing: -0.02em;
+        }
+    </style>
+</head>
+<body class="bg-background text-on-background font-body min-h-screen flex items-center justify-center p-0 md:p-6 lg:p-12">
+<!-- Suppression of Nav Shells as per Destination Rule: Authentication pages are focused journeys -->
+<main class="w-full max-w-7xl grid grid-cols-1 md:grid-cols-2 bg-surface-container-lowest rounded-[2rem] overflow-hidden editorial-shadow min-h-[800px]">
+<!-- Branding Section (Visual Side) -->
+<section class="relative hidden md:flex flex-col justify-between p-12 bg-surface-container-low overflow-hidden">
+<!-- Decorative Background Element -->
+<div class="absolute top-0 right-0 w-full h-full opacity-10 pointer-events-none">
+<img alt="Logistics network" class="w-full h-full object-cover grayscale" data-alt="Modern logistics warehouse with high-tech conveyor systems and automated sorting machinery under soft blue industrial lighting, cinematic perspective" src="https://lh3.googleusercontent.com/aida-public/AB6AXuA3ITQ85qTmyVFecNHv7Qa6btNqidQaUIK9VZgA3HtUdJ_t4wBw7egUnInaI9lvZKPzQW5Dib1Rlbik2CP_xQu3bRmq4AGuBP1IOBcKahIJ3Ml69SCYM2siquBSqao2AGzx6CjrIMjaJF-ozDTAY5hngGWFcOC_j16h_dcYBMzKPFbkXj4bVr9QUvLwy-iC2sX4hJ7xZRVInIVUK0WR27hGfAtKK8dxBhg9rKIUBiE0D3kI1kjsv-ygi-gJ-RAnDB9w0ejVNHvVqQc"/>
+</div>
+<!-- Precision Navigator Logo Placeholder (Content Identity from JSON) -->
+<div class="relative z-10">
+<div class="flex items-center gap-3">
+<div class="w-10 h-10 signature-gradient rounded-xl flex items-center justify-center">
+<span class="material-symbols-outlined text-white" style="font-variation-settings: 'FILL' 1;">local_shipping</span>
+</div>
+<div>
+<h1 class="font-montserrat font-extrabold text-xl tracking-tighter text-primary">Shadowfax</h1>
+<p class="font-montserrat font-medium text-[10px] uppercase tracking-widest text-outline">Precision Navigator</p>
+</div>
+</div>
+</div>
+<div class="relative z-10 max-w-md">
+<h2 class="font-montserrat font-bold text-4xl text-on-surface mb-6 text-editorial-tight leading-tight">
+                    Optimizing the world's <span class="text-primary">last mile</span>, one shipment at a time.
+                </h2>
+<p class="text-on-surface-variant font-body text-lg leading-relaxed">
+                    Access the industry-leading logistics dashboard to track fleet metrics, optimize routes, and manage your precision delivery ecosystem.
+                </p>
+</div>
+<div class="relative z-10 flex gap-4">
+<div class="bg-surface-container-lowest/80 backdrop-blur-md p-4 rounded-2xl editorial-shadow flex items-center gap-4 border border-outline-variant/10">
+<div class="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center">
+<span class="material-symbols-outlined text-primary">speed</span>
+</div>
+<div>
+<p class="text-xs font-label text-outline uppercase font-semibold">Real-time Efficiency</p>
+<p class="text-lg font-montserrat font-bold text-on-surface">99.4% <span class="text-xs text-primary font-medium">+1.2%</span></p>
+</div>
+</div>
+</div>
+</section>
+<!-- Form Section -->
+<section class="flex flex-col justify-center items-center p-8 md:p-16 lg:p-24 bg-surface-container-lowest">
+<div class="w-full max-w-sm">
+<!-- Mobile Logo -->
+<div class="md:hidden flex items-center gap-3 mb-12">
+<div class="w-10 h-10 signature-gradient rounded-xl flex items-center justify-center">
+<span class="material-symbols-outlined text-white" style="font-variation-settings: 'FILL' 1;">local_shipping</span>
+</div>
+<h1 class="font-montserrat font-extrabold text-xl tracking-tighter text-primary">Shadowfax</h1>
+</div>
+<header class="mb-10 text-center md:text-left">
+<h2 class="font-montserrat font-bold text-3xl text-on-surface mb-2">Welcome Back</h2>
+<p class="text-on-surface-variant font-body">Please enter your precision credentials.</p>
+</header>
+<form class="space-y-6" onsubmit="return false;">
+<div class="space-y-2">
+<label class="block text-sm font-montserrat font-semibold text-on-surface-variant ml-1" for="email">Email Address</label>
+<div class="relative group">
+<input class="w-full h-14 px-4 bg-surface-container-low border-none rounded-xl focus:ring-0 text-on-surface font-body transition-all group-hover:bg-surface-container placeholder:text-outline-variant" id="email" name="email" placeholder="name@company.com" type="email"/>
+<div class="absolute bottom-0 left-0 w-0 h-0.5 bg-primary transition-all duration-300 group-focus-within:w-full"></div>
+</div>
+</div>
+<div class="space-y-2">
+<div class="flex justify-between items-center ml-1">
+<label class="text-sm font-montserrat font-semibold text-on-surface-variant" for="password">Password</label>
+<a class="text-sm font-montserrat font-semibold text-primary hover:text-primary-container transition-colors" href="#">Forgot Password?</a>
+</div>
+<div class="relative group">
+<input class="w-full h-14 px-4 bg-surface-container-low border-none rounded-xl focus:ring-0 text-on-surface font-body transition-all group-hover:bg-surface-container placeholder:text-outline-variant" id="password" name="password" placeholder="••••••••" type="password"/>
+<div class="absolute bottom-0 left-0 w-0 h-0.5 bg-primary transition-all duration-300 group-focus-within:w-full"></div>
+</div>
+</div>
+<div class="flex items-center gap-3 py-2">
+<input class="w-5 h-5 rounded border-outline-variant text-primary focus:ring-primary/20" id="remember" type="checkbox"/>
+<label class="text-sm font-body text-on-surface-variant select-none" for="remember">Stay signed in for 30 days</label>
+</div>
+<button class="w-full h-14 signature-gradient text-white font-montserrat font-bold rounded-xl editorial-shadow hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2" type="submit">
+                        Sign In
+                        <span class="material-symbols-outlined text-[20px]">arrow_forward</span>
+</button>
+</form>
+<footer class="mt-12 text-center">
+<p class="text-on-surface-variant font-body text-sm">
+                        Don't have an account? 
+                        <a class="text-primary font-montserrat font-bold hover:underline ml-1" href="#">Contact Admin</a>
+</p>
+</footer>
+</div>
+<!-- Micro-metric decoration for high-end feel -->
+<div class="mt-auto pt-16 w-full max-w-sm hidden lg:block">
+<div class="flex items-center justify-between border-t border-outline-variant/10 pt-6">
+<div class="flex flex-col">
+<span class="text-[10px] font-montserrat font-bold text-outline uppercase tracking-tighter">System Status</span>
+<div class="flex items-center gap-2">
+<div class="w-2 h-2 rounded-full bg-emerald-500"></div>
+<span class="text-xs font-montserrat font-medium text-on-surface-variant">All Systems Operational</span>
+</div>
+</div>
+<div class="flex -space-x-2">
+<div class="w-8 h-8 rounded-full border-2 border-surface-container-lowest bg-surface-variant overflow-hidden">
+<img class="w-full h-full object-cover" data-alt="Portrait of professional male logistics manager in office" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAArye6cmSKWPkAjk_WlWPerDctWw2aspNpXg68kAQYAQrHxL_XMwatFWVcW1FTsr2mcfrgau0DroLHxxkZgi8cefHgRO5tuf8ztdei9yiBgs_7zDegjis6iuMGxfF8oCLebUsrG2gPi0D2XdBwbBYPQEHdUwic21crUyEZaCS-W46DWYG-WX6tAj0vji_4xXIAthmHE5wcm6mubQJw7Mksh0Lb-lBlp4R9DHS10Y2cqnoaOd5aRbzP3kn8D0BlTB2cnLdx8X9sls0"/>
+</div>
+<div class="w-8 h-8 rounded-full border-2 border-surface-container-lowest bg-surface-variant overflow-hidden">
+<img class="w-full h-full object-cover" data-alt="Portrait of confident female operation lead smiling" src="https://lh3.googleusercontent.com/aida-public/AB6AXuDbRMVAEkpox-RsTlJ8Xg9jiEcUXcLavlQuYSvFxgIbd_lvcHBf_XU4reb3IB4krDSeU0UYZLhe3-mRyvmwa7_WQAIaEFkKWcnImtTl119hugv4B5FZwZ4ZFkAOVYj3Im42mnKIwSsootH112fiSgQzpjKrP3kR_VkDc3wbHAqUGQqrmMfm0eaWeEUGEMsiO-lcDWgUD8EW9ZB0ZFKOP9HGimG0Eb_UJ5oYc1dss84deFNC-pL7ezm_iIItEvpA-V4c9l7DpOJYU_I"/>
+</div>
+<div class="w-8 h-8 rounded-full border-2 border-surface-container-lowest bg-surface-variant flex items-center justify-center text-[10px] font-bold text-on-surface-variant">
+                            +4k
+                        </div>
+</div>
+</div>
+</div>
+</section>
+</main>
+</body></html>
