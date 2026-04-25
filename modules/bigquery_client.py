@@ -126,10 +126,21 @@ def auto_connect():
     """
     Try ADC first, then cached OAuth credentials.
     Returns (client, auth_mode, error_msg).
-    auth_mode: "adc" | "google_oauth" | "needs_key" | None
+    auth_mode: "adc" | "google_oauth" | "streamlit_secrets" | "needs_key" | None
     """
     if not HAS_BQ:
         return None, None, "google-cloud-bigquery not installed. Run: pip install google-cloud-bigquery"
+
+    # Option S — Streamlit Cloud secrets (gcp_service_account section in secrets.toml)
+    try:
+        secrets = st.secrets
+        if "gcp_service_account" in secrets:
+            creds_dict = dict(secrets["gcp_service_account"])
+            client = bigquery.Client.from_service_account_info(creds_dict, project=PROJECT_ID)
+            client.query(f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1").result(timeout=10)
+            return client, "streamlit_secrets", None
+    except Exception:
+        pass
 
     # Option B — Cached Google OAuth credentials (try first — fast check)
     try:
