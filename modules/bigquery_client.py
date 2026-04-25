@@ -131,11 +131,30 @@ def auto_connect():
     if not HAS_BQ:
         return None, None, "google-cloud-bigquery not installed. Run: pip install google-cloud-bigquery"
 
-    # Option S — Streamlit Cloud secrets (gcp_service_account section in secrets.toml)
+    # Option S1 — Streamlit secrets: OAuth refresh token (Gmail login, no JSON key needed)
     try:
-        secrets = st.secrets
-        if "gcp_service_account" in secrets:
-            creds_dict = dict(secrets["gcp_service_account"])
+        if HAS_OAUTH and "google_oauth" in st.secrets:
+            s = st.secrets["google_oauth"]
+            creds = OAuthCredentials(
+                token=None,
+                refresh_token=s["refresh_token"],
+                token_uri=s.get("token_uri", "https://oauth2.googleapis.com/token"),
+                client_id=s["client_id"],
+                client_secret=s["client_secret"],
+                scopes=["https://www.googleapis.com/auth/bigquery",
+                        "https://www.googleapis.com/auth/cloud-platform"],
+            )
+            creds.refresh(AuthRequest())
+            client = bigquery.Client(project=PROJECT_ID, credentials=creds)
+            client.query(f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1").result(timeout=10)
+            return client, "streamlit_oauth", None
+    except Exception:
+        pass
+
+    # Option S2 — Streamlit secrets: service account JSON (gcp_service_account section)
+    try:
+        if "gcp_service_account" in st.secrets:
+            creds_dict = dict(st.secrets["gcp_service_account"])
             client = bigquery.Client.from_service_account_info(creds_dict, project=PROJECT_ID)
             client.query(f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1").result(timeout=10)
             return client, "streamlit_secrets", None

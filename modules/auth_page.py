@@ -9,8 +9,8 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-# ── Demo credentials ──
-_VALID_USERS = {
+# ── Default credentials (overridden by st.secrets["users"] if set) ──
+_DEFAULT_USERS = {
     "admin@shadowfax.in": "shadowfax2026",
     "admin": "shadowfax2026",
     "demo@shadowfax.in": "demo2026",
@@ -18,8 +18,18 @@ _VALID_USERS = {
 }
 
 
+def _get_valid_users() -> dict:
+    """Return credentials dict — from st.secrets if available, else defaults."""
+    try:
+        if "users" in st.secrets:
+            return {k.lower(): v for k, v in st.secrets["users"].items()}
+    except Exception:
+        pass
+    return _DEFAULT_USERS
+
+
 def check_credentials(email: str, password: str) -> bool:
-    return _VALID_USERS.get(email.strip().lower()) == password
+    return _get_valid_users().get(email.strip().lower()) == password
 
 
 def _get_logo_b64() -> str:
