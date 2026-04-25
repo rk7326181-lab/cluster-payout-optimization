@@ -24,6 +24,8 @@ from bigquery_client import (
     HAS_BQ, fetch_awb_data, load_awb_from_cache, get_awb_cache_info,
     _save_awb_cache, load_hexbin_cache, load_awb_sample_cache,
     get_hub_pincode_counts, get_awb_preview, _get_awb_cache_path,
+    is_cloud_environment as bq_is_cloud_env,
+    auto_connect as bq_auto_connect,
 )
 from cpo_analytics import CPOAnalytics
 from polygon_optimizer import PolygonOptimizer
@@ -1210,20 +1212,42 @@ with st.sidebar:
     if not is_connected:
         st.markdown('<div class="pn-section-label">Connection</div>', unsafe_allow_html=True)
         if HAS_BQ:
-            if st.button("Login with Google", key="login_btn", use_container_width=True):
-                with st.spinner("Opening Google login..."):
-                    ok, err = handle_google_oauth_login()
-                if ok:
-                    st.rerun()
-                else:
-                    st.error(err)
-            sa_file = st.file_uploader("Upload JSON key", type=["json"], key="sa_upload")
-            if sa_file:
-                ok, err = handle_service_account_upload(sa_file)
-                if ok:
-                    st.rerun()
-                else:
-                    st.error(err)
+            _on_cloud = bq_is_cloud_env()
+            if _on_cloud:
+                # On Streamlit Cloud — auto-connect via secrets should have worked.
+                # Show status and guide user to fix secrets if it didn't.
+                st.warning(
+                    "BigQuery not connected.\n\n"
+                    "On Streamlit Cloud, connection is automatic via your saved "
+                    "Google credentials in Secrets.\n\n"
+                    "Go to **App menu (⋮) → Settings → Secrets** and confirm the "
+                    "`[google_oauth]` section is present and saved."
+                )
+                if st.button("Retry Auto-Connect", key="retry_connect_btn", use_container_width=True):
+                    with st.spinner("Retrying BigQuery connection..."):
+                        _c, _m, _e = bq_auto_connect()
+                    if _c:
+                        st.session_state["bq_client"] = _c
+                        st.session_state["bq_auth_mode"] = _m
+                        st.rerun()
+                    else:
+                        st.error("Still cannot connect. Check Secrets configuration.")
+            else:
+                # Local environment — offer browser login and JSON key upload
+                if st.button("Login with Google", key="login_btn", use_container_width=True):
+                    with st.spinner("Opening Google login..."):
+                        ok, err = handle_google_oauth_login()
+                    if ok:
+                        st.rerun()
+                    else:
+                        st.error(err)
+                sa_file = st.file_uploader("Upload JSON key", type=["json"], key="sa_upload")
+                if sa_file:
+                    ok, err = handle_service_account_upload(sa_file)
+                    if ok:
+                        st.rerun()
+                    else:
+                        st.error(err)
         st.markdown("---")
     else:
         if bq_mode == "google_oauth":

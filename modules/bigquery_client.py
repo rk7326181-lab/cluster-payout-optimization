@@ -198,15 +198,42 @@ def connect_with_service_account(creds_dict):
         return None, str(e)
 
 
+def is_cloud_environment() -> bool:
+    """Detect if running on Streamlit Cloud or any headless server (no browser available)."""
+    # Streamlit Community Cloud sets HOME=/home/appuser
+    if os.environ.get("HOME") == "/home/appuser":
+        return True
+    # No DISPLAY on Linux = headless
+    if os.name != "nt" and not os.environ.get("DISPLAY"):
+        return True
+    # Try finding a browser — if none found, we're headless
+    try:
+        import webbrowser
+        webbrowser.get()
+        return False
+    except Exception:
+        return True
+
+
 def connect_with_google_oauth():
     """
     Option D — Google OAuth login. Opens browser for Google sign-in.
+    On cloud/headless environments, returns an instructional error instead.
     Returns (client, error_msg).
     """
     if not HAS_BQ:
         return None, "google-cloud-bigquery not installed."
     if not HAS_OAUTH:
         return None, "google-auth-oauthlib not installed. Run: pip install google-auth-oauthlib"
+
+    # On Streamlit Cloud, browser-based OAuth is not possible.
+    # BigQuery should connect automatically via st.secrets["google_oauth"].
+    if is_cloud_environment():
+        return None, (
+            "CLOUD_ENV: Browser login is not available on Streamlit Cloud. "
+            "BigQuery connects automatically via your saved Google credentials in Secrets. "
+            "Go to app Settings → Secrets and make sure the [google_oauth] section is saved correctly."
+        )
 
     try:
         flow = InstalledAppFlow.from_client_config(OAUTH_CLIENT_CONFIG, OAUTH_SCOPES)
