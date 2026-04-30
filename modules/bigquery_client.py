@@ -692,7 +692,14 @@ def compute_period_overlay_data() -> dict:
             lats = sub["lat"].to_numpy(dtype=np.float64)
             lngs = sub["long"].to_numpy(dtype=np.float64)
             hubs = sub["hub"].astype(str).to_numpy() if "hub" in sub.columns else np.full(len(sub), "", dtype=object)
-            pincodes = sub["pincode"].astype(str).to_numpy() if "pincode" in sub.columns else np.full(len(sub), "", dtype=object)
+            if "pincode" in sub.columns:
+                _raw = sub["pincode"].tolist()
+                pincodes = np.array([
+                    str(int(float(p))) if str(p).replace('.', '', 1).isdigit() else str(p).strip()
+                    for p in _raw
+                ], dtype=object)
+            else:
+                pincodes = np.full(len(sub), "", dtype=object)
 
             # Hex grid
             cols = np.round(lngs / (HEX_SIZE * 1.5)).astype(np.int32)
@@ -868,7 +875,17 @@ def _precompute_hexbin_cache(df):
         lats = work["lat"].to_numpy(dtype=np.float64)
         lngs = work["long"].to_numpy(dtype=np.float64)
         hubs = work["hub"].astype(str).to_numpy() if "hub" in work.columns else np.full(len(work), "", dtype=object)
-        pincodes = work["pincode"].astype(str).to_numpy() if "pincode" in work.columns else np.full(len(work), "", dtype=object)
+
+        # Normalize pincodes: parquet round-trips integers as float64 → "577526.0"
+        # Strip the trailing ".0" so JS lookup matches cluster pincode strings.
+        if "pincode" in work.columns:
+            raw_pins = work["pincode"].tolist()
+            pincodes = np.array([
+                str(int(float(p))) if str(p).replace('.', '', 1).isdigit() else str(p).strip()
+                for p in raw_pins
+            ], dtype=object)
+        else:
+            pincodes = np.full(len(work), "", dtype=object)
 
         # ── hex grid assignment ──────────────────────────────────────────────
         cols = np.round(lngs / (HEX_SIZE * 1.5)).astype(np.int32)

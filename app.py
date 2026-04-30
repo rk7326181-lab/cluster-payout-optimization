@@ -37,6 +37,10 @@ from auth_page import render_login_page
 
 APP_ROOT = Path(__file__).parent
 
+# Ensure required data directories exist on first run (gitignored on cloud)
+(APP_ROOT / "data").mkdir(exist_ok=True)
+(APP_ROOT / "data" / "awb_cache").mkdir(exist_ok=True)
+
 st.set_page_config(
     page_title="Shadowfax Cluster Optimizer",
     page_icon="https://www.shadowfax.in/favicon.ico",

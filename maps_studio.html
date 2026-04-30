@@ -915,10 +915,16 @@ function loadHubData(){
   const HEX_SIZE=0.008;
   const _hexCellsByHub={};  // hubId → [{lat,lng,count,pincode}]
 
-  // Build hub name → id lookup for fast matching
+  // Normalize hub name for matching: lowercase, collapse spaces/underscores/hyphens
+  function _normHub(s){return(s||'').toLowerCase().replace(/[\s_\-]+/g,' ').trim();}
+
+  // Build hub name → id lookup (normalized) for fast matching
   const _hubNameToId={};
   Object.values(hubRegistry).forEach(h=>{
-    if(h.name) _hubNameToId[h.name.toLowerCase()]=h.id;
+    if(h.name){
+      _hubNameToId[h.name.toLowerCase()]=h.id;        // exact lowercase
+      _hubNameToId[_normHub(h.name)]=h.id;            // normalized (underscores→space etc.)
+    }
   });
 
   // Build pincode → hubId mapping from cluster features for fallback matching
@@ -926,37 +932,44 @@ function loadHubData(){
   const _pincodeToHubId={};
   clusterGJ.features.forEach(f=>{
     const p=f.properties||{};
-    const pin=p.pincode||'';
+    // Normalize pincode: strip trailing .0 (float parquet round-trip)
+    let pin=String(p.pincode||'').trim().replace(/\.0+$/,'');
     const hid=p.hub_id||'';
     if(pin&&hid&&!_pincodeToHubId[pin])_pincodeToHubId[pin]=hid;
   });
 
+  function _pinNorm(v){return String(v||'').trim().replace(/\.0+$/,'');}
+
   if(precomputedHex.length>0){
-    let _hexMatched=0,_hexFallback=0;
+    let _hexMatched=0,_hexFallback=0,_hexUnmatched=0;
     precomputedHex.forEach(cell=>{
       const lat=parseFloat(cell.lat),lng=parseFloat(cell.lng);
       if(isNaN(lat)||isNaN(lng))return;
-      let hid=_hubNameToId[(cell.hub||'').toLowerCase()];
+      // Try exact lowercase match first, then normalized match
+      const hubKey=cell.hub||'';
+      let hid=_hubNameToId[hubKey.toLowerCase()]||_hubNameToId[_normHub(hubKey)];
       if(!hid&&cell.pincode){
-        hid=_pincodeToHubId[String(cell.pincode)];
+        hid=_pincodeToHubId[_pinNorm(cell.pincode)];
         if(hid)_hexFallback++;
       }
-      if(!hid)return;
+      if(!hid){_hexUnmatched++;return;}
       _hexMatched++;
       if(!_hexCellsByHub[hid])_hexCellsByHub[hid]=[];
-      _hexCellsByHub[hid].push({lat,lng,count:cell.count||1,pincode:cell.pincode||''});
+      _hexCellsByHub[hid].push({lat,lng,count:cell.count||1,pincode:_pinNorm(cell.pincode)});
     });
-    console.log('[HexViz] Indexed',_hexMatched,'/',precomputedHex.length,'hex cells for',Object.keys(_hexCellsByHub).length,'hubs ('+_hexFallback+' via pincode fallback)');
+    console.log('[HexViz] Indexed',_hexMatched,'/',precomputedHex.length,'hex cells for',Object.keys(_hexCellsByHub).length,'hubs | name-match:',(_hexMatched-_hexFallback),' pin-fallback:',_hexFallback,' unmatched:',_hexUnmatched);
+    if(_hexUnmatched>0&&_hexMatched===0){
+      console.warn('[HexViz] 0 hex cells matched — hub names in AWB data may differ from cluster hub names. Sample AWB hub:',precomputedHex[0]?.hub,' | Sample cluster hub:',Object.values(hubRegistry)[0]?.name);
+    }
   } else if(awbData&&awbData.length){
-    // Fallback: compute hexbins from raw AWB points
+    // Fallback: compute hexbins from raw AWB sample points
     const hubAwbPts={};
     awbData.forEach(a=>{
       const lat=parseFloat(a.lat),lng=parseFloat(a.lng);
       if(isNaN(lat)||isNaN(lng)||lat===0||lng===0)return;
-      let hid=_hubNameToId[(a.hub||'').toLowerCase()];
-      if(!hid&&a.pincode){
-        hid=_pincodeToHubId[String(a.pincode)];
-      }
+      const hubKey=a.hub||'';
+      let hid=_hubNameToId[hubKey.toLowerCase()]||_hubNameToId[_normHub(hubKey)];
+      if(!hid&&a.pincode){hid=_pincodeToHubId[_pinNorm(a.pincode)];}
       if(!hid)return;
       if(!hubAwbPts[hid])hubAwbPts[hid]=[];
       hubAwbPts[hid].push({lat,lng});
@@ -1241,6 +1254,14 @@ function toggleAWBLayer(){
   document.getElementById('btn-awb').classList.toggle('active',awbVisible);
   const awbBtn=document.getElementById('awbToggleBtn');
   if(awbBtn)awbBtn.style.background=awbVisible?'rgba(52,211,153,.2)':'';
+
+  // When turning AWB on, render hexbins for ALL visible hubs immediately
+  // (not just the focused hub) so the user sees data right away.
+  if(awbVisible&&typeof window.renderHubHexbins==='function'){
+    Object.keys(hubRegistry).forEach(hid=>{
+      if(hubRegistry[hid]&&hubRegistry[hid].visible) window.renderHubHexbins(hid);
+    });
+  }
 
   Object.keys(awbLayerGroups).forEach(hid=>{
     const h=hubRegistry[hid];
@@ -2663,8 +2684,9 @@ if(window.__CLUSTER_GEOJSON__&&window.__CLUSTER_GEOJSON__.features&&window.__CLU
       const gjBounds=L.geoJSON(window.__CLUSTER_GEOJSON__).getBounds();
       if(gjBounds.isValid())map.fitBounds(gjBounds,{padding:[30,30]});
     }catch(e){}
-    // Auto-show hexbins if AWB data exists
-    if(window.__AWB_DATA__&&window.__AWB_DATA__.length>0&&!awbVisible){
+    // Auto-show hexbins if AWB hexbin data exists (sample OR precomputed hexbins)
+    const _hasAwb=(window.__AWB_DATA__&&window.__AWB_DATA__.length>0)||(window.__HEXBIN_DATA__&&window.__HEXBIN_DATA__.length>0);
+    if(_hasAwb&&!awbVisible){
       toggleAWBLayer();
     }
     // Auto-open hub panel
