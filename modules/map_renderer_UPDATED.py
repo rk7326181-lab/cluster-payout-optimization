@@ -225,24 +225,24 @@ class MapRenderer:
     def _add_hub_marker(self, map_obj, hub_row):
         """Add a hub location marker to the map"""
         try:
-            # Create custom icon (red triangle)
+            # Create custom icon (home symbol)
             icon_html = """
-            <svg width="30" height="30" viewBox="0 0 30 30" xmlns="http://www.w3.org/2000/svg">
-                <polygon points="15,5 25,25 5,25" 
-                         fill="#EF4444" 
-                         stroke="#991B1B" 
-                         stroke-width="2"/>
-                <circle cx="15" cy="17" r="3" fill="white"/>
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none"
+                 xmlns="http://www.w3.org/2000/svg"
+                 stroke="#1e3a5f" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                 style="filter:drop-shadow(0 2px 4px rgba(0,0,0,0.5));">
+                <path d="M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9.5z" fill="#3b82f6"/>
+                <path d="M9 21V12h6v9" fill="#1d4ed8"/>
             </svg>
             """
             
             popup_html = f"""
             <div style='width: 220px; font-family: Arial, sans-serif;'>
-                <h4 style='margin: 0 0 10px 0; color: #1f2937; border-bottom: 2px solid #ef4444; padding-bottom: 5px;'>
-                    🏢 {hub_row['name']}
+                <h4 style='margin: 0 0 10px 0; color: #1f2937; border-bottom: 2px solid #3b82f6; padding-bottom: 5px;'>
+                    🏠 {hub_row['name']}
                 </h4>
                 <table style='width: 100%; font-size: 12px; border-collapse: collapse;'>
-                    <tr style='background-color: #fef2f2;'>
+                    <tr style='background-color: #eff6ff;'>
                         <td style='padding: 5px; font-weight: bold;'>Hub ID:</td>
                         <td style='padding: 5px;'>{hub_row['id']}</td>
                     </tr>
@@ -250,7 +250,7 @@ class MapRenderer:
                         <td style='padding: 5px; font-weight: bold;'>Category:</td>
                         <td style='padding: 5px;'>{hub_row.get('hub_category', 'N/A')}</td>
                     </tr>
-                    <tr style='background-color: #fef2f2;'>
+                    <tr style='background-color: #eff6ff;'>
                         <td style='padding: 5px; font-weight: bold;'>Latitude:</td>
                         <td style='padding: 5px;'>{hub_row['latitude']:.6f}</td>
                     </tr>

@@ -577,7 +577,31 @@ let cGroup=null,cOn=false;function toggleClustering(){cOn=!cOn;document.getEleme
 function handleImport(e){const file=e.target.files[0];if(!file)return;const li=parseInt(document.getElementById('iLayer').value);const tl=isNaN(li)?ALI:li;const reader=new FileReader();reader.onload=ev=>{const txt=ev.target.result,n=file.name.toLowerCase();try{if(n.endsWith('.geojson')||n.endsWith('.json'))importGJ(JSON.parse(txt),tl);else if(n.endsWith('.csv'))importCSV(txt,tl);else if(n.endsWith('.kml'))importKML(txt,tl);togglePanel('importExportPanel');}catch(err){alert('Import error: '+err.message);}};reader.readAsText(file);e.target.value='';}
 function importGJ(data,li){const gl=L.geoJSON(data,{style:{color:CL[li]?.color||'#4f8ef7',weight:2,fillOpacity:.2},pointToLayer:(f,ll)=>L.marker(ll),onEachFeature:(f,layer)=>{if(f.properties)layer.bindPopup(Object.entries(f.properties).map(([k,v])=>'<b>'+k+':</b> '+v).join('<br/>'));layer._li=li;}});CL[li].group.addLayer(gl);CL[li].count++;renderLL();try{map.fitBounds(gl.getBounds());}catch(e){}}
 function importCSV(txt,li){const{data}=Papa.parse(txt,{header:true,skipEmptyLines:true});let first=null;data.forEach(row=>{const lat=parseFloat(row.lat||row.latitude||row.Lat||row.LAT);const lng=parseFloat(row.lng||row.lon||row.longitude||row.Lng||row.LON);if(isNaN(lat)||isNaN(lng))return;const name=row.name||row.Name||row.title||row.NAME||'Import';const m=L.marker([lat,lng]).bindPopup('<b>'+name+'</b>');addToL(li,m);if(!first)first=[lat,lng];});if(first)map.setView(first,10);}
-function importKML(txt,li){const kml=new DOMParser().parseFromString(txt,'text/xml');kml.querySelectorAll('Placemark').forEach(pm=>{const name=pm.querySelector('name')?.textContent||'KML';const col=CL[li]?.color||'#4f8ef7';const pt=pm.querySelector('Point coordinates')?.textContent?.trim();if(pt){const[ln,la]=pt.split(',').map(Number);if(!isNaN(la)){const m=L.marker([la,ln]).bindPopup('<b>'+name+'</b>');addToL(li,m);}}const ls=pm.querySelector('LineString coordinates')?.textContent?.trim();if(ls){const pts=ls.trim().split(/\s+/).map(c=>{const[ln,la]=c.split(',').map(Number);return[la,ln];});const pl=L.polyline(pts,{color:col,weight:2}).bindPopup('<b>'+name+'</b>');addToL(li,pl);}const pg=pm.querySelector('Polygon outerBoundaryIs LinearRing coordinates')?.textContent?.trim();if(pg){const pts=pg.trim().split(/\s+/).map(c=>{const[ln,la]=c.split(',').map(Number);return[la,ln];});const poly=L.polygon(pts,{color:col,fillOpacity:.2}).bindPopup('<b>'+name+'</b>');addToL(li,poly);}});}
+function importKML(txt,li){
+  // Strip XML namespace declarations so querySelector works reliably
+  const cleanTxt=txt.replace(/\s+xmlns(?::\w+)?="[^"]*"/g,'');
+  const kml=new DOMParser().parseFromString(cleanTxt,'text/xml');
+  const col=CL[li]?.color||'#4f8ef7';
+  let added=0;
+  const bounds=[];
+  kml.querySelectorAll('Placemark').forEach(pm=>{
+    const name=pm.querySelector('name')?.textContent||'KML';
+    const desc=pm.querySelector('description')?.textContent||'';
+    const popupHtml=`<b>${name}</b>${desc?'<br/><span style="font-size:11px;color:#94a3b8">'+desc+'</span>':''}`;
+    // Points
+    const pt=pm.querySelector('Point coordinates')?.textContent?.trim();
+    if(pt){const[ln,la]=pt.split(',').map(Number);if(!isNaN(la)&&!isNaN(ln)){const m=L.marker([la,ln]).bindPopup(popupHtml);addToL(li,m);bounds.push([la,ln]);added++;}}
+    // LineStrings
+    const ls=pm.querySelector('LineString coordinates')?.textContent?.trim();
+    if(ls){const pts=ls.trim().split(/\s+/).map(c=>{const[ln,la]=c.split(',').map(Number);return[la,ln];}).filter(p=>!isNaN(p[0])&&!isNaN(p[1]));if(pts.length>=2){const pl=L.polyline(pts,{color:col,weight:2}).bindPopup(popupHtml);addToL(li,pl);pts.forEach(p=>bounds.push(p));added++;}}
+    // Polygons — try querySelector first, then getElementsByTagName fallback
+    let pgTxt=pm.querySelector('Polygon outerBoundaryIs LinearRing coordinates')?.textContent?.trim();
+    if(!pgTxt){const coordEls=pm.getElementsByTagName('coordinates');for(let i=0;i<coordEls.length;i++){const par=coordEls[i].parentNode;if(par&&(par.nodeName==='LinearRing'||par.localName==='LinearRing')){pgTxt=coordEls[i].textContent.trim();break;}}}
+    if(pgTxt){const pts=pgTxt.trim().split(/\s+/).map(c=>{const p=c.split(',');return[parseFloat(p[1]),parseFloat(p[0])];}).filter(p=>!isNaN(p[0])&&!isNaN(p[1]));if(pts.length>=3){const poly=L.polygon(pts,{color:col,fillColor:col,fillOpacity:.2,weight:2}).bindPopup(popupHtml);addToL(li,poly);pts.forEach(p=>bounds.push(p));added++;}}
+  });
+  if(added>0){if(bounds.length>0){try{map.fitBounds(L.latLngBounds(bounds),{padding:[30,30]});}catch(e){}}renderLL();}
+  else{alert('No placemarks found in KML file. Check that the file contains Point, LineString, or Polygon placemarks.');}
+}
 function collectFeatures(){
   const features=[];
   // Collect from custom drawing layers
@@ -992,8 +1016,8 @@ function loadHubData(){
     if(h.lat&&h.lng){
       const awbBadge=h.awbCount>0?`<div style="position:absolute;top:-8px;right:-12px;background:#34d399;color:#000;font-size:8px;font-weight:800;padding:1px 4px;border-radius:8px;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.4);border:1.5px solid #fff;font-family:'DM Mono',monospace;">${h.awbCount>=1000?(h.awbCount/1000).toFixed(1)+'k':h.awbCount}</div>`:'';
       const icon=L.divIcon({
-        html:`<div style="position:relative;"><div style="background:${h.color};color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.5);border:2px solid rgba(255,255,255,.3)">H</div>${awbBadge}</div>`,
-        className:'',iconSize:[28,28],iconAnchor:[14,14]
+        html:`<div style="position:relative;"><div style="background:${h.color};color:#fff;width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.5);border:2px solid rgba(255,255,255,.4)"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9.5z"/><path d="M9 21V12h6v9"/></svg></div>${awbBadge}</div>`,
+        className:'',iconSize:[32,32],iconAnchor:[16,16]
       });
       const hm=L.marker([h.lat,h.lng],{icon,zIndexOffset:500});
       hm._hubIdRef=h.id;
@@ -2620,8 +2644,8 @@ function openHubEditPopup(hubId,marker){
       // Update marker icon with new name
       const awbBadge=h.awbCount>0?`<div style="position:absolute;top:-8px;right:-12px;background:#34d399;color:#000;font-size:8px;font-weight:800;padding:1px 4px;border-radius:8px;white-space:nowrap;box-shadow:0 1px 4px rgba(0,0,0,.4);border:1.5px solid #fff;font-family:'DM Mono',monospace;">${h.awbCount>=1000?(h.awbCount/1000).toFixed(1)+'k':h.awbCount}</div>`:'';
       marker.setIcon(L.divIcon({
-        html:`<div style="position:relative;"><div style="background:${h.color};color:#fff;width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;box-shadow:0 2px 8px rgba(0,0,0,.5);border:2px solid rgba(255,255,255,.3)">H</div>${awbBadge}</div>`,
-        className:'',iconSize:[28,28],iconAnchor:[14,14]
+        html:`<div style="position:relative;"><div style="background:${h.color};color:#fff;width:32px;height:32px;border-radius:50%;display:flex;align-items:center;justify-content:center;box-shadow:0 2px 8px rgba(0,0,0,.5);border:2px solid rgba(255,255,255,.4)"><svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9.5L12 3l9 6.5V20a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9.5z"/><path d="M9 21V12h6v9"/></svg></div>${awbBadge}</div>`,
+        className:'',iconSize:[32,32],iconAnchor:[16,16]
       }));
       map.closePopup(popup);
       renderHubList();
@@ -2634,6 +2658,11 @@ function openHubEditPopup(hubId,marker){
 if(window.__CLUSTER_GEOJSON__&&window.__CLUSTER_GEOJSON__.features&&window.__CLUSTER_GEOJSON__.features.length){
   setTimeout(()=>{
     loadHubData();
+    // Zoom map to fit all cluster polygons
+    try{
+      const gjBounds=L.geoJSON(window.__CLUSTER_GEOJSON__).getBounds();
+      if(gjBounds.isValid())map.fitBounds(gjBounds,{padding:[30,30]});
+    }catch(e){}
     // Auto-show hexbins if AWB data exists
     if(window.__AWB_DATA__&&window.__AWB_DATA__.length>0&&!awbVisible){
       toggleAWBLayer();

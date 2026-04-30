@@ -1162,7 +1162,7 @@ with st.sidebar:
 
     # ── Connection status badge (before nav, matching stitch) ──
     bq_mode = st.session_state.get("bq_auth_mode")
-    is_connected = bq_mode in ("adc", "google_oauth", "service_account")
+    is_connected = bq_mode in ("adc", "google_oauth", "service_account", "streamlit_oauth", "streamlit_secrets")
     badge_cls = "pn-badge-connected" if is_connected else "pn-badge-disconnected"
     badge_txt = "BigQuery Connected" if is_connected else "Not Connected"
     st.markdown(f"""
@@ -1392,7 +1392,7 @@ with st.sidebar:
     st.markdown('<div class="pn-section-label">External Data</div>', unsafe_allow_html=True)
 
     # AWB fetch from BigQuery (quick button in sidebar)
-    _bq_connected = st.session_state.get("bq_auth_mode") in ("adc", "google_oauth", "service_account")
+    _bq_connected = st.session_state.get("bq_auth_mode") in ("adc", "google_oauth", "service_account", "streamlit_oauth", "streamlit_secrets")
     if _bq_connected and st.session_state.data_loaded:
         if st.button("Fetch AWB from BigQuery", key="sidebar_fetch_awb_bq", use_container_width=True, type="primary"):
             _bq_cl = st.session_state.get("bq_client")
