@@ -1449,7 +1449,9 @@ with st.sidebar:
             except Exception as e:
                 st.error(f"Error: {e}")
         else:
-            st.success(f"AWB data loaded ({st.session_state.get('_awb_cached_df', pd.DataFrame()).shape[0]:,} records)")
+            _awb_meta = get_awb_cache_info()
+            _awb_count = _awb_meta.get("record_count") or st.session_state.get("_awb_cached_df", pd.DataFrame()).shape[0]
+            st.success(f"AWB data loaded ({_awb_count:,} records)")
 
     uploaded_excel = st.file_uploader("Upload Excel / CSV", type=['xlsx'], key="cpo_upload")
     if uploaded_excel:

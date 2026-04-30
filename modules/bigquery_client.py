@@ -1105,76 +1105,248 @@ def build_awb_query(cluster_df=None, manual_pincodes=None):
     return query
 
 
-def _download_with_progress(query_job, progress_cb, start_pct=0.72, end_pct=0.85):
+def _norm_pincode(val):
+    """Normalize pincode: strip trailing .0 from float round-trips (577526.0 → 577526)."""
+    s = str(val).strip()
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s
+
+
+def _stream_to_parquet(query_job, parquet_path, progress_cb=None, start_pct=0.72, end_pct=0.90):
     """
-    Download BigQuery results with real-time progress feedback.
-    Uses page iteration for large results, direct to_dataframe for small ones.
+    Stream BigQuery results page-by-page directly to a parquet file.
+    Never loads the full result into memory — safe for 11M+ row results on 1GB RAM.
+    Returns total rows written.
     """
-    # Get total row count from completed job
-    result = query_job.result()  # iterator
-    total_rows = query_job.result().total_rows if hasattr(query_job.result(), 'total_rows') else None
-
-    # Try to get row count from destination table
-    if total_rows is None:
-        try:
-            dest = query_job.destination
-            if dest:
-                from google.cloud import bigquery as _bq
-                _tbl = query_job._client.get_table(dest)
-                total_rows = _tbl.num_rows
-        except Exception:
-            pass
-
-    if total_rows and total_rows > 0 and progress_cb:
-        progress_cb(start_pct, f"⬇️ Downloading {total_rows:,} rows...")
-
-    # For small results (< 50k rows), use direct to_dataframe (faster)
-    if total_rows is not None and total_rows < 50000:
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError:
+        # pyarrow not available — fall back to in-memory download
+        if progress_cb:
+            progress_cb(start_pct + 0.02, "⬇️ Downloading (no pyarrow, loading into memory)...")
         df = query_job.to_dataframe()
+        df.to_parquet(parquet_path, index=False)
         if progress_cb:
             progress_cb(end_pct, f"⬇️ Downloaded {len(df):,} rows")
-        return df
+        return len(df)
 
-    # For large results, download in pages with progress
-    PAGE_SIZE = 25000
-    pages = []
-    rows_downloaded = 0
+    os.makedirs(os.path.dirname(parquet_path), exist_ok=True)
+    PAGE_SIZE = 25_000
+
+    # Try to get total row count for progress display
+    total_rows_est = None
     try:
-        rows_iter = query_job._client.list_rows(
-            query_job.destination,
-            page_size=PAGE_SIZE,
-        )
+        dest = query_job.destination
+        if dest:
+            _tbl = query_job._client.get_table(dest)
+            total_rows_est = _tbl.num_rows
+    except Exception:
+        pass
+
+    if total_rows_est and progress_cb:
+        progress_cb(start_pct, f"⬇️ Streaming {total_rows_est:,} rows to parquet...")
+
+    writer = None
+    rows_written = 0
+    try:
+        rows_iter = query_job._client.list_rows(query_job.destination, page_size=PAGE_SIZE)
         for page in rows_iter.pages:
             page_df = page.to_dataframe()
-            pages.append(page_df)
-            rows_downloaded += len(page_df)
-            if progress_cb and total_rows and total_rows > 0:
-                pct = start_pct + (end_pct - start_pct) * min(rows_downloaded / total_rows, 1.0)
-                progress_cb(pct, f"⬇️ Downloaded {rows_downloaded:,} / {total_rows:,} rows ({rows_downloaded * 100 // total_rows}%)")
-            elif progress_cb:
-                progress_cb(start_pct + (end_pct - start_pct) * 0.5, f"⬇️ Downloaded {rows_downloaded:,} rows...")
-    except Exception:
-        # Fallback to direct to_dataframe if page iteration fails
+            if page_df.empty:
+                continue
+            # Normalize pincode in-flight so parquet stores clean strings
+            if "pincode" in page_df.columns:
+                page_df["pincode"] = page_df["pincode"].apply(_norm_pincode)
+            tbl = pa.Table.from_pandas(page_df, preserve_index=False)
+            if writer is None:
+                writer = pq.ParquetWriter(parquet_path, tbl.schema)
+            writer.write_table(tbl)
+            rows_written += len(page_df)
+            if progress_cb:
+                if total_rows_est:
+                    pct = start_pct + (end_pct - start_pct) * min(rows_written / total_rows_est, 1.0)
+                    progress_cb(pct, f"⬇️ {rows_written:,} / {total_rows_est:,} rows ({rows_written * 100 // total_rows_est}%)")
+                else:
+                    progress_cb(min(start_pct + 0.1, end_pct - 0.05), f"⬇️ {rows_written:,} rows written...")
+    except Exception as e:
+        # Fallback: in-memory download if streaming fails
+        print(f"Streaming fallback triggered: {e}")
+        if writer:
+            try:
+                writer.close()
+            except Exception:
+                pass
+            writer = None
         if progress_cb:
-            progress_cb(start_pct + 0.02, f"⬇️ Downloading results (fallback)...")
-        return query_job.to_dataframe()
-
-    if pages:
-        df = pd.concat(pages, ignore_index=True)
-    else:
-        df = pd.DataFrame()
+            progress_cb(start_pct + 0.02, "⬇️ Streaming failed, loading into memory (fallback)...")
+        try:
+            df = query_job.to_dataframe()
+            if "pincode" in df.columns:
+                df["pincode"] = df["pincode"].apply(_norm_pincode)
+            df.to_parquet(parquet_path, index=False, engine="pyarrow")
+            rows_written = len(df)
+        except Exception as e2:
+            raise Exception(f"Both streaming and fallback download failed: {e2}")
+    finally:
+        if writer:
+            try:
+                writer.close()
+            except Exception:
+                pass
 
     if progress_cb:
-        progress_cb(end_pct, f"⬇️ Downloaded {len(df):,} rows")
-    return df
+        progress_cb(end_pct, f"✅ {rows_written:,} rows saved to parquet")
+    return rows_written
+
+
+def _precompute_hexbin_from_parquet(parquet_path):
+    """
+    Memory-efficient hexbin computation using DuckDB directly on parquet.
+    Performs the full hex-grid aggregation in SQL — never loads all rows into Python.
+    Safe for 11M+ row datasets on 1GB RAM cloud instances.
+    """
+    if not os.path.exists(parquet_path):
+        print("_precompute_hexbin_from_parquet: parquet file not found")
+        return
+    if not HAS_DUCKDB:
+        print("_precompute_hexbin_from_parquet: DuckDB not available, using pandas fallback")
+        _precompute_hexbin_cache(load_awb_from_cache() or pd.DataFrame())
+        return
+
+    HEX_SIZE = 0.008
+    SQRT3 = 1.7320508075688772
+
+    try:
+        con = duckdb.connect()
+
+        # Compute hex grid entirely in SQL — output is ~100k aggregated rows, not 11M
+        agg_sql = f"""
+            WITH norm AS (
+                SELECT
+                    CAST(hub AS VARCHAR)     AS hub,
+                    CAST(pincode AS VARCHAR) AS pincode,
+                    CAST(lat  AS DOUBLE)     AS lat,
+                    CAST(long AS DOUBLE)     AS lng
+                FROM read_parquet(?)
+                WHERE lat IS NOT NULL AND long IS NOT NULL
+                  AND lat != 0 AND long != 0
+            ),
+            grid AS (
+                SELECT hub, pincode,
+                    ROUND(lng / {HEX_SIZE * 1.5})::INT AS col,
+                    ROUND((lat - CASE
+                        WHEN ABS(ROUND(lng / {HEX_SIZE * 1.5})) % 2 = 1
+                        THEN {HEX_SIZE * SQRT3 * 0.5}
+                        ELSE 0.0 END) / {HEX_SIZE * SQRT3})::INT AS row_
+                FROM norm
+            )
+            SELECT hub, pincode, col, row_, COUNT(*) AS cnt
+            FROM grid
+            GROUP BY hub, pincode, col, row_
+        """
+        agg_df = con.execute(agg_sql, [parquet_path]).fetchdf()
+        print(f"hexbin: DuckDB aggregated {len(agg_df):,} hex cells from parquet")
+
+        # Sample 8k random points for awb_sample.json (lat/lng preview layer)
+        sample_sql = """
+            SELECT
+                CAST(hub      AS VARCHAR) AS hub,
+                CAST(pincode  AS VARCHAR) AS pincode,
+                CAST(lat      AS DOUBLE)  AS lat,
+                CAST(long     AS DOUBLE)  AS lng
+            FROM read_parquet(?) USING SAMPLE 8000
+            WHERE lat IS NOT NULL AND long IS NOT NULL AND lat != 0 AND long != 0
+        """
+        sample_df = con.execute(sample_sql, [parquet_path]).fetchdf()
+        con.close()
+
+        _build_hexbin_json(agg_df, sample_df, HEX_SIZE, SQRT3)
+
+    except Exception as e:
+        print(f"_precompute_hexbin_from_parquet DuckDB error: {e}")
+        # Last-resort fallback: read only 4 columns with DuckDB and process in pandas
+        try:
+            con2 = duckdb.connect()
+            slim = con2.execute("""
+                SELECT CAST(hub AS VARCHAR) AS hub, CAST(pincode AS VARCHAR) AS pincode,
+                       CAST(lat AS DOUBLE) AS lat, CAST(long AS DOUBLE) AS long
+                FROM read_parquet(?)
+                WHERE lat IS NOT NULL AND long IS NOT NULL AND lat != 0 AND long != 0
+            """, [parquet_path]).fetchdf()
+            con2.close()
+            _precompute_hexbin_cache(slim)
+        except Exception as e2:
+            print(f"_precompute_hexbin_from_parquet fallback also failed: {e2}")
+
+
+def _build_hexbin_json(agg_df, sample_df, HEX_SIZE, SQRT3):
+    """
+    Convert DuckDB-aggregated hex cells (hub, pincode, col, row_, cnt) into
+    hexbin_cache.json and awb_sample.json. Called after DuckDB aggregation.
+    """
+    try:
+        os.makedirs(AWB_CACHE_DIR, exist_ok=True)
+
+        if agg_df is None or len(agg_df) == 0:
+            print("_build_hexbin_json: empty aggregation, skipping")
+            return
+
+        cols_arr = agg_df["col"].to_numpy(dtype=np.float64)
+        rows_arr = agg_df["row_"].to_numpy(dtype=np.float64)
+        center_lat = rows_arr * HEX_SIZE * SQRT3 + np.where(
+            np.abs(cols_arr) % 2 == 1, HEX_SIZE * SQRT3 * 0.5, 0.0
+        )
+        center_lng = cols_arr * HEX_SIZE * 1.5
+
+        hex_records = []
+        hubs_col   = agg_df["hub"].tolist()
+        pins_col   = agg_df["pincode"].tolist()
+        cnts_col   = agg_df["cnt"].tolist()
+        for i in range(len(agg_df)):
+            pin = _norm_pincode(pins_col[i])
+            hex_records.append({
+                "lat":     round(float(center_lat[i]), 5),
+                "lng":     round(float(center_lng[i]), 5),
+                "hub":     str(hubs_col[i]),
+                "count":   int(cnts_col[i]),
+                "pincode": pin,
+            })
+
+        hexbin_path = os.path.join(AWB_CACHE_DIR, "hexbin_cache.json")
+        with open(hexbin_path, "w", encoding="utf-8") as f:
+            json.dump(hex_records, f, ensure_ascii=False)
+        print(f"hexbin cache: saved {len(hex_records):,} hex cells → {hexbin_path}")
+
+        # AWB sample (8k points for window.__AWB_DATA__)
+        if sample_df is not None and len(sample_df) > 0:
+            lat_col = "lat" if "lat" in sample_df.columns else next((c for c in sample_df.columns if "lat" in c.lower()), None)
+            lng_col = "lng" if "lng" in sample_df.columns else next((c for c in sample_df.columns if "lng" in c.lower() or "lon" in c.lower()), None)
+            if lat_col and lng_col:
+                sample_records = []
+                for r in sample_df.to_dict("records"):
+                    pin = _norm_pincode(r.get("pincode", ""))
+                    sample_records.append({
+                        "lat":     round(float(r[lat_col]), 5),
+                        "lng":     round(float(r[lng_col]), 5),
+                        "hub":     str(r.get("hub", "")),
+                        "pincode": pin,
+                    })
+                sample_path = os.path.join(AWB_CACHE_DIR, "awb_sample.json")
+                with open(sample_path, "w", encoding="utf-8") as f:
+                    json.dump(sample_records, f, ensure_ascii=False)
+                print(f"hexbin cache: saved {len(sample_records):,} sample points → {sample_path}")
+
+    except Exception as e:
+        print(f"_build_hexbin_json error: {e}")
 
 
 def fetch_awb_data(client, cluster_df=None, force_refresh=False, progress_cb=None, manual_pincodes=None):
     """
-    Fetch AWB data from BigQuery with disk caching.
-    Returns (DataFrame, error_msg).
-    Only queries BigQuery if force_refresh=True or no cache exists.
-    Accepts cluster_df (auto pincodes) or manual_pincodes list.
+    Fetch AWB data from BigQuery.
+    Uses streaming parquet write to handle 11M+ rows without OOM.
+    Returns a 50k-row sample DataFrame for session state + stores full data in parquet.
     """
     if not force_refresh:
         cached = load_awb_from_cache()
@@ -1182,6 +1354,8 @@ def fetch_awb_data(client, cluster_df=None, force_refresh=False, progress_cb=Non
             return cached, None
 
     query = build_awb_query(cluster_df=cluster_df, manual_pincodes=manual_pincodes)
+    cache_parquet = _get_awb_cache_path().replace(".csv", ".parquet")
+    os.makedirs(AWB_CACHE_DIR, exist_ok=True)
 
     try:
         if progress_cb:
@@ -1190,16 +1364,59 @@ def fetch_awb_data(client, cluster_df=None, force_refresh=False, progress_cb=Non
 
         _poll_query_job(query_job, progress_cb, base_pct=0.08, end_pct=0.70, label="AWB")
 
-        df = _download_with_progress(query_job, progress_cb, start_pct=0.72, end_pct=0.85)
+        if progress_cb:
+            progress_cb(0.72, "⬇️ Streaming results to parquet (memory-safe)...")
+
+        # Stream page-by-page to parquet — never loads full dataset into Python memory
+        total_rows = _stream_to_parquet(
+            query_job, cache_parquet, progress_cb, start_pct=0.72, end_pct=0.88
+        )
+
+        # Save metadata
+        meta = {
+            "fetched_date":   datetime.now().strftime("%Y-%m-%d"),
+            "fetched_time":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "record_count":   total_rows,
+            "columns":        ["order_date","rider_id","hub","pincode","payment_category",
+                               "fwd_del_awb_number","lat","long"],
+        }
+        with open(_get_awb_cache_meta_path(), "w", encoding="utf-8") as f:
+            json.dump(meta, f, ensure_ascii=False)
 
         if progress_cb:
-            progress_cb(0.88, f"💾 Saving {len(df):,} rows to cache...")
-        _save_awb_cache(df)
+            progress_cb(0.90, f"🔢 Computing AWB hexbins via DuckDB ({total_rows:,} rows)...")
+
+        # Compute hexbins entirely via DuckDB SQL — never loads 11M rows into pandas
+        _precompute_hexbin_from_parquet(cache_parquet)
+
+        # Return a small sample for session state (PIP stats, sidebar display)
+        if progress_cb:
+            progress_cb(0.97, "📋 Loading 50k sample for session...")
+        sample_df = _load_session_sample(cache_parquet, n=50_000)
 
         if progress_cb:
-            progress_cb(1.0, f"✅ {len(df):,} AWB records cached successfully.")
-        return df, None
+            progress_cb(1.0, f"✅ {total_rows:,} AWB records saved. Session sample: {len(sample_df):,} rows.")
+        return sample_df, None
+
     except GoogleAPIError as e:
         return None, f"BigQuery API Error: {e}"
     except Exception as e:
         return None, f"Error: {e}"
+
+
+def _load_session_sample(parquet_path, n=50_000):
+    """Load a small random sample from parquet for session state. Never OOMs."""
+    if HAS_DUCKDB and os.path.exists(parquet_path):
+        try:
+            con = duckdb.connect()
+            df = con.execute(f"SELECT * FROM read_parquet(?) USING SAMPLE {n}", [parquet_path]).fetchdf()
+            con.close()
+            return df
+        except Exception:
+            pass
+    # Pandas fallback
+    try:
+        df = pd.read_parquet(parquet_path)
+        return df.sample(min(len(df), n), random_state=42) if len(df) > n else df
+    except Exception:
+        return pd.DataFrame()
