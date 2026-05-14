@@ -31,6 +31,7 @@ from cpo_analytics import CPOAnalytics
 from polygon_optimizer import PolygonOptimizer
 from gandalf_engine import GandalfEngine
 from gandalf_llm import get_llm_status, gandalf_chat
+from cluster_burn import render_burn_tab
 import json
 import streamlit.components.v1 as components
 from auth_page import render_login_page
@@ -1558,7 +1559,7 @@ if not st.session_state.data_loaded:
     st.stop()
 
 # Tabs
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Map", "CPO Dashboard", "Recommendations", "Data", "Maps Studio", "GANDALF AI"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Map", "CPO Dashboard", "Recommendations", "Data", "Maps Studio", "GANDALF AI", "🔥 Burn Calc"])
 
 # ── TAB 1: MAP ──
 with tab1:
@@ -2839,3 +2840,7 @@ with tab6:
     st.error(f"GANDALF AI initialization error: {_gandalf_err}")
     import traceback
     st.code(traceback.format_exc())
+
+# ── TAB 7: BURN CALC ──
+with tab7:
+    render_burn_tab(st.session_state.get("bq_client"))
