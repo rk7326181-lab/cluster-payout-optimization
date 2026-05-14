@@ -328,34 +328,23 @@ def render_burn_tab(bq_client=None):
     with st.container():
         hub_mode = st.radio(
             "Hub ID source",
-            ["Auto — select from list (BigQuery)", "Manual — type hub IDs"],
+            ["Auto — select from loaded data", "Manual — type hub IDs"],
             horizontal=True,
             key="burn_hub_mode",
             label_visibility="collapsed",
         )
 
         if hub_mode.startswith("Auto"):
-            # Fetch hub list (cached in session)
-            if "burn_hub_df" not in st.session_state:
-                if bq_ok:
-                    with st.spinner("Loading hub list from BigQuery…"):
-                        try:
-                            st.session_state["burn_hub_df"] = calc.fetch_hub_list(bq_client)
-                        except Exception as exc:
-                            st.error(f"Hub fetch failed: {exc}")
-                            st.session_state["burn_hub_df"] = pd.DataFrame(columns=["id", "name"])
-                else:
-                    st.session_state["burn_hub_df"] = pd.DataFrame(columns=["id", "name"])
+            hub_df = st.session_state.get("hub_data")
 
-            hub_df = st.session_state["burn_hub_df"]
-
-            if hub_df.empty:
-                st.info("No hubs loaded. Check BigQuery connection.")
+            if hub_df is None or (hasattr(hub_df, "empty") and hub_df.empty):
+                st.info("No hub data loaded yet. Please load data using the **Data** tab first.")
                 selected_ids = []
+                name_map = {}
             else:
-                options      = [f"{r['name']}  (ID: {r['id']})" for _, r in hub_df.iterrows()]
-                id_map       = {f"{r['name']}  (ID: {r['id']})": int(r["id"]) for _, r in hub_df.iterrows()}
-                name_map     = {int(r["id"]): r["name"] for _, r in hub_df.iterrows()}
+                options  = [f"{r['name']}  (ID: {r['id']})" for _, r in hub_df.iterrows()]
+                id_map   = {f"{r['name']}  (ID: {r['id']})": int(r["id"]) for _, r in hub_df.iterrows()}
+                name_map = {int(r["id"]): r["name"] for _, r in hub_df.iterrows()}
 
                 chosen = st.multiselect(
                     "Select hub(s)",
@@ -364,10 +353,6 @@ def render_burn_tab(bq_client=None):
                     key="burn_hub_multiselect",
                 )
                 selected_ids = [id_map[c] for c in chosen]
-
-                if st.button("🔄 Refresh hub list", key="burn_refresh_hubs"):
-                    st.session_state.pop("burn_hub_df", None)
-                    st.rerun()
         else:
             manual_raw = st.text_input(
                 "Hub IDs (comma-separated)",
@@ -380,9 +365,9 @@ def render_burn_tab(bq_client=None):
             ] if manual_raw.strip() else []
 
             name_map = {}
-            if bq_ok and selected_ids and "burn_hub_df" in st.session_state:
-                hdf = st.session_state["burn_hub_df"]
-                name_map = {int(r["id"]): r["name"] for _, r in hdf.iterrows()}
+            hub_df = st.session_state.get("hub_data")
+            if hub_df is not None and not (hasattr(hub_df, "empty") and hub_df.empty):
+                name_map = {int(r["id"]): r["name"] for _, r in hub_df.iterrows()}
 
     # ════════════════════════════════════════
     # STEP 2 — DATE RANGE
