@@ -1217,42 +1217,57 @@ with st.sidebar:
     if not is_connected:
         st.markdown('<div class="pn-section-label">Connection</div>', unsafe_allow_html=True)
         if HAS_BQ:
-            _on_cloud = bq_is_cloud_env()
-            if _on_cloud:
-                # On Streamlit Cloud — auto-connect via secrets should have worked.
-                # Show status and guide user to fix secrets if it didn't.
-                st.warning(
-                    "BigQuery not connected.\n\n"
-                    "On Streamlit Cloud, connection is automatic via your saved "
-                    "Google credentials in Secrets.\n\n"
-                    "Go to **App menu (⋮) → Settings → Secrets** and confirm the "
-                    "`[google_oauth]` section is present and saved."
-                )
-                if st.button("Retry Auto-Connect", key="retry_connect_btn", use_container_width=True):
-                    with st.spinner("Retrying BigQuery connection..."):
-                        _c, _m, _e = bq_auto_connect()
-                    if _c:
-                        st.session_state["bq_client"] = _c
-                        st.session_state["bq_auth_mode"] = _m
-                        st.rerun()
-                    else:
-                        st.error("Still cannot connect. Check Secrets configuration.")
+            # Show specific error if we know why it failed
+            _bq_err = st.session_state.get("bq_connect_error")
+            if _bq_err:
+                st.error(_bq_err)
             else:
-                # Local environment — offer browser login and JSON key upload
+                st.warning("BigQuery not connected.")
+
+            _on_cloud = bq_is_cloud_env()
+
+            # Always show Retry button
+            if st.button("Retry Auto-Connect", key="retry_connect_btn", use_container_width=True):
+                with st.spinner("Retrying BigQuery connection..."):
+                    _c, _m, _e = bq_auto_connect()
+                if _c:
+                    st.session_state["bq_client"] = _c
+                    st.session_state["bq_auth_mode"] = _m
+                    st.session_state.pop("bq_connect_error", None)
+                    st.rerun()
+                else:
+                    if _e:
+                        st.session_state["bq_connect_error"] = _e
+                    st.error(_e or "Still cannot connect.")
+
+            # On cloud: also guide to Secrets
+            if _on_cloud:
+                st.caption(
+                    "On Streamlit Cloud, go to **App menu → Settings → Secrets** "
+                    "and confirm `[google_oauth]` or `[gcp_service_account]` is saved."
+                )
+
+            # Always offer Google login (works on local; on cloud shows instructions)
+            if not _on_cloud:
                 if st.button("Login with Google", key="login_btn", use_container_width=True):
                     with st.spinner("Opening Google login..."):
                         ok, err = handle_google_oauth_login()
                     if ok:
+                        st.session_state.pop("bq_connect_error", None)
                         st.rerun()
                     else:
                         st.error(err)
-                sa_file = st.file_uploader("Upload JSON key", type=["json"], key="sa_upload")
-                if sa_file:
-                    ok, err = handle_service_account_upload(sa_file)
-                    if ok:
-                        st.rerun()
-                    else:
-                        st.error(err)
+
+            # Always offer service account JSON upload (works everywhere)
+            st.caption("Or upload a service account key:")
+            sa_file = st.file_uploader("Upload JSON key", type=["json"], key="sa_upload")
+            if sa_file:
+                ok, err = handle_service_account_upload(sa_file)
+                if ok:
+                    st.session_state.pop("bq_connect_error", None)
+                    st.rerun()
+                else:
+                    st.error(err)
         st.markdown("---")
     else:
         if bq_mode == "google_oauth":
@@ -2246,7 +2261,7 @@ with tab4:
 
         st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
 
-        ptab1, ptab2, ptab3 = st.tabs(["Clusters Preview", "Hub Locations Preview", "AWB Data"])
+        ptab1, ptab2, ptab3, ptab4 = st.tabs(["Clusters Preview", "Hub Locations Preview", "AWB Data", "Serviceability"])
         with ptab1:
             st.dataframe(cluster_df.head(100), use_container_width=True, hide_index=True)
         with ptab2:
@@ -2427,6 +2442,207 @@ with tab4:
                 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
                 st.caption(f"Preview: first 200 of {_awb_preview['total_rows']:,} records (stored as Parquet for fast loading)")
                 st.dataframe(_awb_preview["preview_df"], use_container_width=True, hide_index=True)
+
+        # ── Serviceability Tab ──
+        with ptab4:
+            from modules.serviceability_fetcher import (
+                has_gmail_auth, connect_gmail, run_full_pipeline,
+                SENDER_EMAIL, SUBJECT_KEYWORD,
+            )
+
+            st.markdown("""
+            <div style="margin-bottom:16px;">
+                <h3 style="font-size:1.1rem; margin:0 0 4px 0;">Serviceability Pincode List</h3>
+                <p style="font-size:0.85rem; color:var(--sfx-text-muted); margin:0;">
+                    Fetches the latest <b>LM Serviceable Pincode</b> Excel directly from Gmail
+                    (sent by <code>tripti.kumari0@shadowfax.in</code>) and enriches it with
+                    Hub IDs from BigQuery.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            # ── Credentials file check ──
+            from modules.serviceability_fetcher import _CREDS_FILE as _svc_creds_file
+            _creds_missing = not _svc_creds_file.exists()
+            if _creds_missing:
+                st.error(
+                    "**Setup required:** OAuth credentials file not found at "
+                    f"`config/credentials_oauth.json`\n\n"
+                    "**Steps:**\n"
+                    "1. Open [GCP Console](https://console.cloud.google.com) → project `bi-team-400508`\n"
+                    "2. **APIs & Services → Library** → enable **Gmail API**\n"
+                    "3. **APIs & Services → Credentials** → **+ Create Credentials** → **OAuth client ID** → type: **Desktop app**\n"
+                    "4. Download JSON → save as `config/credentials_oauth.json` in this project folder\n"
+                    "5. **OAuth consent screen → Test users** → add `ravindra.tangellamudi@shadowfax.in`",
+                    icon="⚙️"
+                )
+
+            # ── Auth status banner ──
+            _gmail_authed = (not _creds_missing) and has_gmail_auth()
+            if not _creds_missing:
+                if _gmail_authed:
+                    st.success("Gmail connected — ready to fetch", icon="✅")
+                else:
+                    st.warning(
+                        "Gmail not connected yet. Click **Connect Gmail** to authorise "
+                        "once — credentials are cached after that.",
+                        icon="🔐"
+                    )
+                    if st.button("Connect Gmail", key="gmail_connect_btn", type="primary"):
+                        with st.spinner("Opening browser for Google login…"):
+                            _creds, _err = connect_gmail()
+                        if _err:
+                            st.error(f"OAuth failed: {_err}")
+                        else:
+                            st.success("Gmail connected! Now click 'Fetch Latest File' below.")
+                            st.rerun()
+
+            st.markdown("---")
+
+            # ── Fetch controls ──
+            _sv_c1, _sv_c2 = st.columns([3, 1])
+            with _sv_c1:
+                st.caption(
+                    f"Searches for: **Subject** contains `{SUBJECT_KEYWORD}` "
+                    f"· **From** `{SENDER_EMAIL}`"
+                )
+
+            _bq_client = st.session_state.get("bq_client")
+            _use_bq = _bq_client is not None
+
+            if not _use_bq:
+                st.info(
+                    "BigQuery not connected — Hub IDs will be blank. "
+                    "Connect via the sidebar to enrich results.",
+                    icon="ℹ️"
+                )
+
+            if st.button(
+                "Fetch Latest Serviceability File from Gmail",
+                key="fetch_serviceability_btn",
+                type="primary",
+                disabled=not _gmail_authed,
+                use_container_width=False,
+            ):
+                _sv_log_lines = []
+
+                def _sv_status(msg):
+                    _sv_log_lines.append(msg)
+
+                _sv_prog = st.progress(0, text="Starting…")
+                _sv_stat = st.empty()
+
+                STEPS = [
+                    "Authenticating with Gmail",
+                    "Searching Gmail",
+                    "Saving raw file",
+                    "Parsing Excel",
+                    "Fetching hub IDs",
+                    "Done",
+                ]
+                _sv_step = [0]
+
+                def _sv_cb(msg):
+                    _sv_step[0] = min(_sv_step[0] + 1, len(STEPS) - 1)
+                    pct = int(_sv_step[0] / (len(STEPS) - 1) * 100)
+                    _sv_prog.progress(pct, text=msg)
+                    _sv_stat.markdown(f"_{msg}_")
+
+                merged_df, summary_df, meta, err = run_full_pipeline(
+                    bq_client=_bq_client if _use_bq else None,
+                    status_cb=_sv_cb,
+                )
+
+                _sv_prog.empty()
+                _sv_stat.empty()
+
+                if err:
+                    st.error(f"Fetch failed: {err}")
+                else:
+                    st.session_state["_svc_merged_df"]  = merged_df
+                    st.session_state["_svc_summary_df"] = summary_df
+                    st.session_state["_svc_meta"]       = meta
+                    st.rerun()
+
+            # ── Results ──
+            _svc_df   = st.session_state.get("_svc_merged_df")
+            _svc_summ = st.session_state.get("_svc_summary_df")
+            _svc_meta = st.session_state.get("_svc_meta")
+
+            if _svc_df is not None and _svc_meta is not None:
+                st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+                # Metadata banner
+                st.markdown(f"""
+                <div style="background:var(--sfx-surface);border:1px solid var(--sfx-border);
+                            border-radius:10px;padding:12px 16px;margin-bottom:16px;">
+                    <b>📧 {_svc_meta.get('subject','')}</b><br>
+                    <span style="font-size:0.8rem;color:var(--sfx-text-muted);">
+                        Received: {_svc_meta.get('email_date','')} &nbsp;·&nbsp;
+                        File: {_svc_meta.get('filename','')} &nbsp;·&nbsp;
+                        Fetched: {_svc_meta.get('fetched_at','')}
+                    </span>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # KPI row
+                _k1, _k2, _k3, _k4 = st.columns(4)
+                _k1.metric("Total Pincodes",  f"{_svc_meta.get('total_rows', 0):,}")
+                _k2.metric("Unique Hubs",     f"{_svc_meta.get('total_hubs', 0):,}")
+                _k3.metric("Matched w/ Hub ID", f"{_svc_meta.get('matched', 0):,}")
+                _k4.metric("Unmatched",        f"{_svc_meta.get('unmatched', 0):,}")
+
+                st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+
+                # Download buttons
+                _dl1, _dl2 = st.columns(2)
+                with _dl1:
+                    st.download_button(
+                        "⬇ Download Full Table (Hub | Hub ID | Pincode)",
+                        _svc_df.to_csv(index=False),
+                        f"serviceability_with_hub_ids_{datetime.now().strftime('%Y%m%d')}.csv",
+                        "text/csv",
+                        use_container_width=True,
+                    )
+                with _dl2:
+                    st.download_button(
+                        "⬇ Download Hub Summary",
+                        _svc_summ.to_csv(index=False),
+                        f"serviceability_hub_summary_{datetime.now().strftime('%Y%m%d')}.csv",
+                        "text/csv",
+                        use_container_width=True,
+                    )
+
+                st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+                # Sub-view toggle
+                _sv_view = st.radio(
+                    "View",
+                    ["Full Table (Hub | Hub ID | Pincode)", "Hub Summary (pin count per hub)"],
+                    horizontal=True, key="svc_view_toggle",
+                )
+                if _sv_view.startswith("Full"):
+                    # Search filter
+                    _sv_search = st.text_input(
+                        "Filter by hub name or pincode",
+                        placeholder="e.g. DEL_Daryaganj or 110001",
+                        key="svc_search",
+                    )
+                    _disp_df = _svc_df
+                    if _sv_search.strip():
+                        _q = _sv_search.strip().lower()
+                        _disp_df = _svc_df[
+                            _svc_df["hub_name"].str.lower().str.contains(_q, na=False)
+                            | _svc_df["pincode"].astype(str).str.contains(_q, na=False)
+                        ]
+                    st.caption(f"Showing {len(_disp_df):,} of {len(_svc_df):,} rows")
+                    st.dataframe(_disp_df, use_container_width=True, hide_index=True, height=450)
+                else:
+                    st.caption(f"{len(_svc_summ):,} hubs")
+                    st.dataframe(_svc_summ, use_container_width=True, hide_index=True, height=450)
+
+    else:
+        st.info("Load cluster data first using the sidebar.", icon="ℹ️")
 
 # ── TAB 5: MAPS STUDIO ──
 with tab5:

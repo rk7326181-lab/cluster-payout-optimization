@@ -161,25 +161,53 @@ def auto_connect():
     except Exception:
         pass
 
-    # Option B — Cached Google OAuth credentials (try first — fast check)
+    # Option B — Cached Google OAuth credentials
+    _last_403_msg = None
     try:
         creds = _load_cached_oauth_credentials()
         if creds:
             client = bigquery.Client(project=PROJECT_ID, credentials=creds)
             client.query(f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1").result(timeout=10)
             return client, "google_oauth", None
-    except Exception:
-        pass
+    except Exception as _e:
+        _estr = str(_e)
+        if "403" in _estr or "Access Denied" in _estr or "does not have bigquery" in _estr:
+            # Credentials are valid but account lacks BigQuery permissions — delete stale cache
+            _last_403_msg = (
+                "Your Google account does not have BigQuery access "
+                f"(project: {PROJECT_ID}). "
+                "Upload a service account JSON key, or ask your GCP admin to grant "
+                "you the **BigQuery Job User** role on that project."
+            )
+            try:
+                if os.path.exists(CREDENTIALS_CACHE):
+                    os.remove(CREDENTIALS_CACHE)
+            except Exception:
+                pass
 
-    # Option A — Application Default Credentials (gcloud auth)
-    # Only try if GOOGLE_APPLICATION_CREDENTIALS is set (avoids slow metadata server timeout)
-    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
-        try:
-            client = bigquery.Client(project=PROJECT_ID)
-            client.query(f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1").result(timeout=10)
-            return client, "adc", None
-        except Exception:
-            pass
+    # Option A — Application Default Credentials (gcloud auth application-default login)
+    # Try unconditionally — works if user has run `gcloud auth application-default login`
+    try:
+        import google.auth
+        _adc_creds, _ = google.auth.default(
+            scopes=["https://www.googleapis.com/auth/bigquery",
+                    "https://www.googleapis.com/auth/cloud-platform"]
+        )
+        client = bigquery.Client(project=PROJECT_ID, credentials=_adc_creds)
+        client.query(f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1").result(timeout=10)
+        return client, "adc", None
+    except Exception as _e:
+        _estr = str(_e)
+        if ("403" in _estr or "Access Denied" in _estr or "does not have bigquery" in _estr) and not _last_403_msg:
+            _last_403_msg = (
+                "ADC credentials found but account lacks BigQuery access "
+                f"(project: {PROJECT_ID}). "
+                "Upload a service account JSON key or contact your GCP admin."
+            )
+
+    # Return the most helpful error we collected
+    if _last_403_msg:
+        return None, "needs_key", _last_403_msg
 
     return None, "needs_key", None
 
@@ -263,8 +291,11 @@ def init_bq_on_startup():
     if client:
         st.session_state["bq_client"] = client
         st.session_state["bq_auth_mode"] = mode
+        st.session_state.pop("bq_connect_error", None)
     else:
         st.session_state["bq_auth_mode"] = "needs_key"
+        if err:
+            st.session_state["bq_connect_error"] = err
 
 
 def handle_service_account_upload(uploaded_file):
