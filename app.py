@@ -1221,6 +1221,11 @@ with st.sidebar:
             _bq_err = st.session_state.get("bq_connect_error")
             if _bq_err:
                 st.error(_bq_err)
+                st.caption(
+                    "**To fix:** Run `python generate_bq_token.py` locally, "
+                    "sign in with the BigQuery-enabled Google account, "
+                    "then paste the printed token into Streamlit → Settings → Secrets."
+                )
             else:
                 st.warning("BigQuery not connected.")
 

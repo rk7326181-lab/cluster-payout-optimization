@@ -131,7 +131,7 @@ def auto_connect():
     if not HAS_BQ:
         return None, None, "google-cloud-bigquery not installed. Run: pip install google-cloud-bigquery"
 
-    # Option S1 — Streamlit secrets: OAuth refresh token (Gmail login, no JSON key needed)
+    # Option S1 — Streamlit secrets: OAuth refresh token
     try:
         if HAS_OAUTH and "google_oauth" in st.secrets:
             s = st.secrets["google_oauth"]
@@ -145,9 +145,16 @@ def auto_connect():
                         "https://www.googleapis.com/auth/cloud-platform"],
             )
             creds.refresh(AuthRequest())
-            client = bigquery.Client(project=PROJECT_ID, credentials=creds)
-            client.query(f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1").result(timeout=10)
-            return client, "streamlit_oauth", None
+            # Try both projects as the billing project — use whichever succeeds
+            for _proj in [PROJECT_ID, DATA_PROJECT_ID]:
+                try:
+                    client = bigquery.Client(project=_proj, credentials=creds)
+                    client.query(
+                        f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1"
+                    ).result(timeout=10)
+                    return client, "streamlit_oauth", None
+                except Exception:
+                    continue
     except Exception:
         pass
 
@@ -155,9 +162,15 @@ def auto_connect():
     try:
         if "gcp_service_account" in st.secrets:
             creds_dict = dict(st.secrets["gcp_service_account"])
-            client = bigquery.Client.from_service_account_info(creds_dict, project=PROJECT_ID)
-            client.query(f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1").result(timeout=10)
-            return client, "streamlit_secrets", None
+            for _proj in [PROJECT_ID, DATA_PROJECT_ID]:
+                try:
+                    client = bigquery.Client.from_service_account_info(creds_dict, project=_proj)
+                    client.query(
+                        f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1"
+                    ).result(timeout=10)
+                    return client, "streamlit_secrets", None
+                except Exception:
+                    continue
     except Exception:
         pass
 
