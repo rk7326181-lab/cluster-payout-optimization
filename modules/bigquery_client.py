@@ -122,16 +122,43 @@ def clear_oauth_credentials():
 # AUTH — ADC -> Cached OAuth -> Service Account -> Manual Login
 # ════════════════════════════════════════════════════
 
-def auto_connect():
+def _connect_from_streamlit_secrets():
     """
-    Try ADC first, then cached OAuth credentials.
-    Returns (client, auth_mode, error_msg).
-    auth_mode: "adc" | "google_oauth" | "streamlit_secrets" | "needs_key" | None
+    Connect using Streamlit secrets. Mirrors the Clustering-web-app method exactly.
+    Reads [gcp_credentials] (type=authorized_user or service_account),
+    or falls back to [google_oauth] section.
+    Returns (client, auth_mode) or (None, None).
     """
-    if not HAS_BQ:
-        return None, None, "google-cloud-bigquery not installed. Run: pip install google-cloud-bigquery"
+    # Primary: [gcp_credentials] section — same format as Clustering-web-app
+    try:
+        raw = st.secrets.get("gcp_credentials", {})
+        creds_dict = json.loads(json.dumps(dict(raw)))
+        if creds_dict and "type" in creds_dict:
+            cred_type = creds_dict.get("type")
+            if cred_type == "service_account":
+                from google.oauth2 import service_account as _sa
+                creds = _sa.Credentials.from_service_account_info(
+                    creds_dict, scopes=OAUTH_SCOPES
+                )
+                client = bigquery.Client(project=PROJECT_ID, credentials=creds)
+                client.query("SELECT 1").result(timeout=15)
+                return client, "service_account"
+            elif cred_type == "authorized_user":
+                creds = OAuthCredentials(
+                    token=None,
+                    refresh_token=creds_dict.get("refresh_token"),
+                    token_uri=creds_dict.get("token_uri", "https://oauth2.googleapis.com/token"),
+                    client_id=creds_dict.get("client_id"),
+                    client_secret=creds_dict.get("client_secret"),
+                )
+                creds.refresh(AuthRequest())
+                client = bigquery.Client(project=PROJECT_ID, credentials=creds)
+                client.query("SELECT 1").result(timeout=15)
+                return client, "streamlit_oauth"
+    except Exception:
+        pass
 
-    # Option S1 — Streamlit secrets: OAuth refresh token
+    # Fallback: [google_oauth] section (flat key=value format)
     try:
         if HAS_OAUTH and "google_oauth" in st.secrets:
             s = st.secrets["google_oauth"]
@@ -141,56 +168,67 @@ def auto_connect():
                 token_uri=s.get("token_uri", "https://oauth2.googleapis.com/token"),
                 client_id=s["client_id"],
                 client_secret=s["client_secret"],
-                scopes=["https://www.googleapis.com/auth/bigquery",
-                        "https://www.googleapis.com/auth/cloud-platform"],
             )
             creds.refresh(AuthRequest())
-            # Try both projects as the billing project — use whichever succeeds
-            for _proj in [PROJECT_ID, DATA_PROJECT_ID]:
-                try:
-                    client = bigquery.Client(project=_proj, credentials=creds)
-                    client.query(
-                        f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1"
-                    ).result(timeout=10)
-                    return client, "streamlit_oauth", None
-                except Exception:
-                    continue
+            client = bigquery.Client(project=PROJECT_ID, credentials=creds)
+            client.query("SELECT 1").result(timeout=15)
+            return client, "streamlit_oauth"
     except Exception:
         pass
 
-    # Option S2 — Streamlit secrets: service account JSON (gcp_service_account section)
+    # Fallback: [gcp_service_account] section
     try:
         if "gcp_service_account" in st.secrets:
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            for _proj in [PROJECT_ID, DATA_PROJECT_ID]:
-                try:
-                    client = bigquery.Client.from_service_account_info(creds_dict, project=_proj)
-                    client.query(
-                        f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1"
-                    ).result(timeout=10)
-                    return client, "streamlit_secrets", None
-                except Exception:
-                    continue
+            creds_dict = json.loads(json.dumps(dict(st.secrets["gcp_service_account"])))
+            client = bigquery.Client.from_service_account_info(creds_dict, project=PROJECT_ID)
+            client.query("SELECT 1").result(timeout=15)
+            return client, "streamlit_secrets"
     except Exception:
         pass
 
-    # Option B — Cached Google OAuth credentials
+    return None, None
+
+
+def auto_connect():
+    """
+    Auth priority (mirrors Clustering-web-app exactly):
+      1. Streamlit secrets  (gcp_credentials / google_oauth / gcp_service_account)
+      2. Application Default Credentials  (gcloud auth application-default login)
+      3. Cached Google OAuth credentials  (local browser login)
+    Returns (client, auth_mode, error_msg).
+    """
+    if not HAS_BQ:
+        return None, None, "google-cloud-bigquery not installed. Run: pip install google-cloud-bigquery"
+
+    # Option 1 — Streamlit secrets (primary for Streamlit Cloud)
+    client, mode = _connect_from_streamlit_secrets()
+    if client:
+        return client, mode, None
+
+    # Option 2 — Application Default Credentials (gcloud auth — local dev)
+    try:
+        client = bigquery.Client(project=PROJECT_ID)
+        client.query("SELECT 1").result(timeout=15)
+        return client, "adc", None
+    except Exception:
+        pass
+
+    # Option 3 — Cached Google OAuth credentials
     _last_403_msg = None
     try:
         creds = _load_cached_oauth_credentials()
         if creds:
             client = bigquery.Client(project=PROJECT_ID, credentials=creds)
-            client.query(f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1").result(timeout=10)
+            client.query("SELECT 1").result(timeout=15)
             return client, "google_oauth", None
     except Exception as _e:
         _estr = str(_e)
         if "403" in _estr or "Access Denied" in _estr or "does not have bigquery" in _estr:
-            # Credentials are valid but account lacks BigQuery permissions — delete stale cache
             _last_403_msg = (
-                "Your Google account does not have BigQuery access "
-                f"(project: {PROJECT_ID}). "
-                "Upload a service account JSON key, or ask your GCP admin to grant "
-                "you the **BigQuery Job User** role on that project."
+                "The Google account in your saved credentials does not have "
+                f"BigQuery access (project: {PROJECT_ID}). "
+                "Run `python generate_bq_token.py` to generate a new token "
+                "with your own account and update Streamlit Secrets."
             )
             try:
                 if os.path.exists(CREDENTIALS_CACHE):
@@ -198,30 +236,8 @@ def auto_connect():
             except Exception:
                 pass
 
-    # Option A — Application Default Credentials (gcloud auth application-default login)
-    # Try unconditionally — works if user has run `gcloud auth application-default login`
-    try:
-        import google.auth
-        _adc_creds, _ = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/bigquery",
-                    "https://www.googleapis.com/auth/cloud-platform"]
-        )
-        client = bigquery.Client(project=PROJECT_ID, credentials=_adc_creds)
-        client.query(f"SELECT 1 FROM `{DATA_PROJECT_ID}.ecommerce.ecommerce_hub` LIMIT 1").result(timeout=10)
-        return client, "adc", None
-    except Exception as _e:
-        _estr = str(_e)
-        if ("403" in _estr or "Access Denied" in _estr or "does not have bigquery" in _estr) and not _last_403_msg:
-            _last_403_msg = (
-                "ADC credentials found but account lacks BigQuery access "
-                f"(project: {PROJECT_ID}). "
-                "Upload a service account JSON key or contact your GCP admin."
-            )
-
-    # Return the most helpful error we collected
     if _last_403_msg:
         return None, "needs_key", _last_403_msg
-
     return None, "needs_key", None
 
 
