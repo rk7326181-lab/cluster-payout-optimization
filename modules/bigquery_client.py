@@ -1196,8 +1196,9 @@ def _stream_to_parquet(query_job, parquet_path, progress_cb=None, start_pct=0.72
         import pyarrow.parquet as pq
     except ImportError:
         if progress_cb:
-            progress_cb(start_pct + 0.02, "⬇️ Downloading via bqstorage (no pyarrow)…")
-        df = _safe_to_dataframe(query_job)
+            progress_cb(start_pct + 0.02, "⬇️ Downloading (no pyarrow — REST)…")
+        # Force REST so read-only users without readsessions still work.
+        df = _safe_to_dataframe(query_job, use_bqstorage=False)
         df.to_parquet(parquet_path, index=False)
         if progress_cb:
             progress_cb(end_pct, f"⬇️ Downloaded {len(df):,} rows")
