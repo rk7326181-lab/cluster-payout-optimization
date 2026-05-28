@@ -51,15 +51,25 @@ class DataLoader:
         Safe no-op otherwise; never crashes the caller.
         Returns (ok: bool, info: str).
         """
-        import os, subprocess, shlex, time
-        try:
-            import streamlit as st
-            token = (
-                os.environ.get("GH_TOKEN")
-                or (st.secrets.get("GH_TOKEN") if hasattr(st, "secrets") else None)
-            )
-        except Exception:
-            token = os.environ.get("GH_TOKEN")
+        import os, subprocess, time
+
+        # Read token from env first, then Streamlit secrets. `st.secrets`
+        # raises StreamlitSecretNotFoundError when no secrets file exists
+        # at all (typical local dev) — guard each access independently.
+        token = os.environ.get("GH_TOKEN")
+        if not token:
+            try:
+                import streamlit as st
+                try:
+                    token = st.secrets["GH_TOKEN"]
+                except Exception:
+                    # Some Streamlit versions expose .get; try as fallback.
+                    try:
+                        token = st.secrets.get("GH_TOKEN")
+                    except Exception:
+                        token = None
+            except Exception:
+                token = None
         if not token:
             return False, "GH_TOKEN not set — skipping git persistence"
 
@@ -128,7 +138,23 @@ class DataLoader:
                 return False, f"origin is not https ({remote}) — set GH_TOKEN + https remote"
 
             run(["git", "push", authed, f"HEAD:{br}"], check=True)
-            return True, f"pushed cache snapshot to origin/{br}"
+
+            # Capture commit hash + remote URL for the confirmation banner.
+            sha = run(["git", "rev-parse", "HEAD"], check=False).stdout.strip()[:7]
+            # Build a clickable URL to the commit (https remote only).
+            url = ""
+            try:
+                base = remote.replace(".git", "").rstrip("/")
+                url = f"{base}/commit/{sha}"
+            except Exception:
+                pass
+            return True, {
+                "ok": True,
+                "branch": br,
+                "sha": sha,
+                "url": url,
+                "message": f"pushed cache snapshot to origin/{br} (commit {sha})",
+            }
         except Exception as e:
             return False, f"git persistence failed: {e}"
 

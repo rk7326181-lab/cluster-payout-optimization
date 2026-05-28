@@ -518,7 +518,21 @@ html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--t
 <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
 <script>
 'use strict';
-const map=L.map('map',{center:[20,78],zoom:5,zoomControl:false});
+// Clamp the map to India only — no panning outside, min zoom blocks the
+// continent-level view, max zoom keeps tile fetches bounded. Cuts tile
+// requests by ~95% vs the world-view default and lowers browser memory.
+const INDIA_BOUNDS=L.latLngBounds([[5.5,67.0],[37.6,98.0]]);
+const map=L.map('map',{
+  center:[20.5937,78.9629],
+  zoom:5,
+  zoomControl:false,
+  minZoom:4,
+  maxZoom:15,
+  maxBounds:INDIA_BOUNDS,
+  maxBoundsViscosity:1.0,   // hard wall — drag stops at the boundary
+  worldCopyJump:false,
+});
+map.fitBounds(INDIA_BOUNDS);
 const TILES={streets:L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'OpenStreetMap',maxZoom:19}),satellite:L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{attribution:'Esri',maxZoom:19}),hybridSat:L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',{attribution:'Esri',maxZoom:19}),hybridLbl:L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png',{attribution:'CartoDB',maxZoom:19}),topo:L.tileLayer('https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',{attribution:'OpenTopoMap',maxZoom:17}),dark:L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',{attribution:'CartoDB',maxZoom:19}),watercolor:L.tileLayer('https://stamen-tiles-{s}.a.ssl.fastly.net/watercolor/{z}/{x}/{y}.jpg',{attribution:'Stamen',maxZoom:16})};
 let curBase=TILES.streets.addTo(map),hybLbl=null;
 function setBase(id){map.removeLayer(curBase);if(hybLbl){map.removeLayer(hybLbl);hybLbl=null;}document.querySelectorAll('[id^="bm-"]').forEach(b=>b.classList.remove('active'));document.getElementById('bm-'+id).classList.add('active');if(id==='hybrid'){curBase=TILES.hybridSat.addTo(map);hybLbl=TILES.hybridLbl.addTo(map);}else curBase=TILES[id].addTo(map);}

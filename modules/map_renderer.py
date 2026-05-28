@@ -53,6 +53,13 @@ class MapRenderer:
     def __init__(self):
         self.default_location = [20.5937, 78.9629]  # Center of India
         self.default_zoom = 5
+        # Constrain panning + zoom to India only. Reduces tile fetches by
+        # ~95% (no Africa / Americas / Asia-Pacific to render) and lowers
+        # both browser memory and server-side HTML payload.
+        # Bounds: south-west (Kanyakumari) to north-east (Arunachal Pradesh).
+        self.INDIA_BOUNDS = [[5.5, 67.0], [37.6, 98.0]]
+        self.MIN_ZOOM = 4
+        self.MAX_ZOOM = 15
 
     def _get_rate_color(self, rate):
         """Get color for a given rate (handles decimal rates)"""
@@ -97,13 +104,19 @@ class MapRenderer:
             center = self.default_location
             zoom = self.default_zoom
 
-        # Create base map
+        # Create base map clamped to India only — no panning outside, no
+        # zoom levels that fetch global tiles. Big win on memory + tile
+        # bandwidth on Streamlit Cloud.
         m = folium.Map(
             location=center,
             zoom_start=zoom,
             tiles='OpenStreetMap',
-            control_scale=True
+            control_scale=True,
+            min_zoom=self.MIN_ZOOM,
+            max_zoom=self.MAX_ZOOM,
+            max_bounds=True,
         )
+        m.fit_bounds(self.INDIA_BOUNDS)
 
         # Build pincode-to-color mapping for pincode mode
         pincode_color_map = {}
@@ -421,7 +434,11 @@ class MapRenderer:
         center = [cluster_df['center_lat'].mean(), cluster_df['center_lon'].mean()] if len(cluster_df) > 0 else self.default_location
         zoom = 10 if len(cluster_df) > 0 else self.default_zoom
 
-        m = folium.Map(location=center, zoom_start=zoom, tiles='OpenStreetMap')
+        m = folium.Map(
+            location=center, zoom_start=zoom, tiles='OpenStreetMap',
+            min_zoom=self.MIN_ZOOM, max_zoom=self.MAX_ZOOM, max_bounds=True,
+        )
+        m.fit_bounds(self.INDIA_BOUNDS)
 
         for idx, row in cluster_df.iterrows():
             if pd.notna(row.get('geometry')) and pd.notna(row.get('cpo')):

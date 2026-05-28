@@ -1504,6 +1504,23 @@ with st.sidebar:
     elif st.session_state.data_loaded:
         st.caption("Loaded from local CSV")
 
+    # ── GitHub backup status — persistent confirmation across reruns ──
+    _gh_status = st.session_state.get("_github_backup_status")
+    if _gh_status:
+        if _gh_status.get("ok"):
+            st.success(_gh_status["msg"], icon="🛡️")
+            if _gh_status.get("url"):
+                st.markdown(
+                    f"<div style='font-size:11px;margin-top:-4px;'>"
+                    f"<a href='{_gh_status['url']}' target='_blank' "
+                    f"style='color:#008A71;text-decoration:none;'>"
+                    f"→ View commit on GitHub</a></div>",
+                    unsafe_allow_html=True,
+                )
+        else:
+            st.warning(_gh_status["msg"], icon="⚠️")
+        st.caption(f"GitHub backup checked at {_gh_status.get('ts','')}")
+
     with st.expander("📡 Fetch fresh data", expanded=not st.session_state.data_loaded):
         col_y, col_m = st.columns(2)
         with col_y:
@@ -1592,9 +1609,39 @@ with st.sidebar:
                     _ok, _info = DataLoader.persist_cache_to_git(
                         message=f"auto: BQ cluster fetch {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [skip ci]"
                     )
-                    if _ok and 'pushed' in _info:
-                        bq_progress(1.0, "✅ Complete — pushed snapshot to repo (survives reboots)")
+
+                    # Build a persistent, user-visible confirmation that the
+                    # snapshot was saved to GitHub (or note why it wasn't).
+                    # We stash it in session_state so it survives the st.rerun()
+                    # and shows on the next render of the sidebar/status area.
+                    if _ok and isinstance(_info, dict):
+                        _sha = _info.get("sha", "")
+                        _branch = _info.get("branch", "main")
+                        _url = _info.get("url", "")
+                        st.session_state["_github_backup_status"] = {
+                            "ok": True,
+                            "msg": (
+                                f"✅ Data backed up to GitHub — "
+                                f"branch `{_branch}`, commit `{_sha}`. "
+                                f"This snapshot will load automatically after any reboot."
+                            ),
+                            "url": _url,
+                            "ts":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        }
+                        bq_progress(1.0, f"✅ Complete — backed up to GitHub (commit {_sha})")
                     else:
+                        _err = _info if isinstance(_info, str) else _info.get("message", "")
+                        st.session_state["_github_backup_status"] = {
+                            "ok": False,
+                            "msg": (
+                                f"⚠️ Data fetched but NOT backed up to GitHub. "
+                                f"Reason: `{_err}`. "
+                                f"On next Streamlit reboot, the older committed snapshot will load instead. "
+                                f"Set the `GH_TOKEN` secret to enable auto-backup."
+                            ),
+                            "url": "",
+                            "ts":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        }
                         bq_progress(1.0, "✅ Complete — fetched & loaded (set GH_TOKEN to persist across reboots)")
                     print(f"persist_cache_to_git: {_info}")
 
