@@ -610,7 +610,15 @@ def render_burn_tab(bq_client=None):
         })
         num = ["Expt_Pincode_Pay", "Cluster_Payout", "Saving", "Burning", "P & L"]
         p[num] = p[num].apply(pd.to_numeric, errors="coerce")
-        p["P & L %"] = (p["P & L"] / p["Expt_Pincode_Pay"].replace(0, pd.NA) * 100).round(2)
+        # Compute % without introducing pd.NA — using numpy.where avoids the
+        # pandas-2.x / Python 3.14 path where `.round()` on a Series with NA
+        # falls back to Python's built-in `round(NA, 2)` and TypeErrors.
+        import numpy as _np
+        denom = p["Expt_Pincode_Pay"].to_numpy(dtype="float64")
+        numer = p["P & L"].to_numpy(dtype="float64")
+        with _np.errstate(divide="ignore", invalid="ignore"):
+            pct = _np.where(denom == 0, 0.0, numer / denom * 100.0)
+        p["P & L %"] = _np.round(pct, 2)
         return p[["hub"] + num + ["P & L %"]]
 
     have_results = (pnl_df1 is not None and not pnl_df1.empty) or \
@@ -627,23 +635,66 @@ def render_burn_tab(bq_client=None):
         t1, s1, b1, n1 = _summary(pnl_df1)
         t2, s2, b2, n2 = _summary(pnl_df2)
 
+        def _abbr(v):
+            """Compact INR: 12,345,678 → ₹1.23Cr ; 12,345 → ₹12.3k."""
+            try:
+                v = float(v)
+            except Exception:
+                return f"₹{v}"
+            sign = "-" if v < 0 else ""
+            a = abs(v)
+            if a >= 1e7:    return f"{sign}₹{a/1e7:.2f}Cr"
+            if a >= 1e5:    return f"{sign}₹{a/1e5:.2f}L"
+            if a >= 1e3:    return f"{sign}₹{a/1e3:.1f}k"
+            return f"{sign}₹{a:,.0f}"
+
+        def _abbr_n(v):
+            """Compact integer: 34,567 → 34.5k."""
+            v = int(v)
+            if abs(v) >= 1_000_000: return f"{v/1_000_000:.2f}M"
+            if abs(v) >= 1_000:     return f"{v/1_000:.1f}k"
+            return f"{v:,}"
+
+        # Shrink Streamlit's huge default metric font so the 8-card row fits
+        # in the 2-column side-by-side layout on standard widths.
+        st.markdown("""
+        <style>
+        .burn-metrics [data-testid="stMetricValue"] {
+            font-size: 1.15rem !important;
+            line-height: 1.2 !important;
+            font-weight: 700 !important;
+        }
+        .burn-metrics [data-testid="stMetricLabel"] {
+            font-size: 0.70rem !important;
+            letter-spacing: 0.04em;
+        }
+        .burn-metrics [data-testid="stMetricDelta"] {
+            font-size: 0.72rem !important;
+        }
+        </style>
+        """, unsafe_allow_html=True)
+        st.markdown('<div class="burn-metrics">', unsafe_allow_html=True)
+
         c1, c2 = st.columns(2)
         with c1:
             st.markdown(f"**CSV #1 — {csv1_label}**")
             mA, mB, mC, mD = st.columns(4)
-            mA.metric("AWBs", f"{t1:,}")
-            mB.metric("Saving", f"₹{s1:,.1f}")
-            mC.metric("Burning", f"₹{b1:,.1f}")
-            mD.metric("Net P&L", f"₹{n1:,.1f}",
-                      delta=f"{'▲' if n1 >= 0 else '▼'} {abs(n1):,.1f}")
+            mA.metric("AWBs",     _abbr_n(t1),  help=f"Exact: {t1:,}")
+            mB.metric("Saving",   _abbr(s1),    help=f"Exact: ₹{s1:,.1f}")
+            mC.metric("Burning",  _abbr(b1),    help=f"Exact: ₹{b1:,.1f}")
+            mD.metric("Net P&L",  _abbr(n1),
+                      delta=f"{'▲' if n1 >= 0 else '▼'} {_abbr(abs(n1))}",
+                      help=f"Exact: ₹{n1:,.1f}")
         with c2:
             st.markdown(f"**CSV #2 — {csv2_label}**")
             mA, mB, mC, mD = st.columns(4)
-            mA.metric("AWBs", f"{t2:,}")
-            mB.metric("Saving", f"₹{s2:,.1f}")
-            mC.metric("Burning", f"₹{b2:,.1f}")
-            mD.metric("Net P&L", f"₹{n2:,.1f}",
-                      delta=f"{'▲' if n2 >= 0 else '▼'} {abs(n2):,.1f}")
+            mA.metric("AWBs",     _abbr_n(t2),  help=f"Exact: {t2:,}")
+            mB.metric("Saving",   _abbr(s2),    help=f"Exact: ₹{s2:,.1f}")
+            mC.metric("Burning",  _abbr(b2),    help=f"Exact: ₹{b2:,.1f}")
+            mD.metric("Net P&L",  _abbr(n2),
+                      delta=f"{'▲' if n2 >= 0 else '▼'} {_abbr(abs(n2))}",
+                      help=f"Exact: ₹{n2:,.1f}")
+        st.markdown('</div>', unsafe_allow_html=True)
 
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 

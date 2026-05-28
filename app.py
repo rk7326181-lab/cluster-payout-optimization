@@ -1114,9 +1114,14 @@ if 'data_loaded' not in st.session_state:
     st.session_state.cluster_data = None
     st.session_state.hub_data = None
     st.session_state.processed_data = None
+    st.session_state.filtered_data = None
     st.session_state.cpo_optimizer = None
     st.session_state.kepler_path = None
     st.session_state.cache_date = None
+elif 'filtered_data' not in st.session_state:
+    # Older session: initialise the new key so Tab 1 never KeyErrors before
+    # the sidebar filter block (which sets it) has had a chance to run.
+    st.session_state.filtered_data = st.session_state.get("processed_data")
 
     loader = DataLoader()
     manifest = loader.get_cache_manifest()
@@ -1129,6 +1134,76 @@ if 'data_loaded' not in st.session_state:
             st.session_state.cache_date = manifest.get("fetched_time", manifest.get("fetched_date", ""))
         except Exception:
             pass
+
+    # ── Auto-fetch from BigQuery on startup if no local cache ──────────────
+    # On Streamlit Cloud the `data/` directory is wiped on container reboot,
+    # so the manifest is usually gone after restart. If a BQ client is already
+    # connected (via service-account or cached OAuth in Streamlit secrets),
+    # auto-fetch silently so the user doesn't have to click "Fetch" again.
+    # Set in `data/auto_fetch.disabled` (or env var DISABLE_BQ_AUTOFETCH=1)
+    # to skip — for local dev where you don't want the network call.
+    _autofetch_disabled = (
+        (APP_ROOT / "data" / "auto_fetch.disabled").exists()
+        or os.environ.get("DISABLE_BQ_AUTOFETCH") == "1"
+    )
+    if (
+        not st.session_state.data_loaded
+        and st.session_state.get("bq_client") is not None
+        and not _autofetch_disabled
+        and not st.session_state.get("_bq_autofetch_attempted")
+    ):
+        st.session_state["_bq_autofetch_attempted"] = True
+        try:
+            from modules.bigquery_client import fetch_live_clusters, fetch_hub_locations
+            _autofetch_status = st.empty()
+            _autofetch_status.info(
+                "⏳ Restoring data from BigQuery (one-time after restart)…",
+                icon="🔄",
+            )
+            _cl_df, _err = fetch_live_clusters(st.session_state["bq_client"], force_refresh=False)
+            if _err:
+                raise RuntimeError(_err)
+            _now = datetime.now()
+            _h_df, _err = fetch_hub_locations(
+                st.session_state["bq_client"], _now.year, _now.month
+            )
+            if _err:
+                raise RuntimeError(_err)
+
+            loader = DataLoader()
+            _cl_df = loader._clean_cluster_data(_cl_df)
+            _h_df = loader._clean_hub_data(_h_df)
+
+            _date_str = _now.strftime('%d%m%Y')
+            _cluster_path = APP_ROOT / "data" / f"clustering_live_{_date_str}.csv"
+            _hub_path = APP_ROOT / "data" / f"hub_Lat_Long{_date_str}.csv"
+            _cluster_path.parent.mkdir(parents=True, exist_ok=True)
+            _cl_df.to_csv(_cluster_path, index=False, encoding="utf-8")
+            _h_df.to_csv(_hub_path, index=False, encoding="utf-8")
+
+            _kep_df, _kep_path = loader.generate_kepler_csv(_cl_df, _h_df)
+            del _kep_df
+            loader.save_cache_manifest(_cluster_path, _hub_path, _kep_path)
+
+            _excel_path = APP_ROOT / "data" / "uploaded_cost_data.xlsx"
+            _process_and_store(
+                _cl_df, _h_df, kepler_path=_kep_path,
+                excel_path=str(_excel_path) if _excel_path.exists() else None,
+            )
+            st.session_state.cache_date = _now.strftime("%Y-%m-%d %H:%M:%S")
+            del _cl_df, _h_df
+            import gc as _gc
+            _gc.collect()
+            _autofetch_status.success(
+                "✅ Data restored from BigQuery — ready to use.", icon="✅"
+            )
+        except Exception as _af_err:
+            # Don't crash app — fall through to the manual "Fetch" UI.
+            st.warning(
+                f"Auto-restore from BigQuery skipped ({_af_err}). "
+                "Use the sidebar **Fetch from BigQuery** button.",
+                icon="⚠️",
+            )
 
 if 'dark_mode' not in st.session_state:
     st.session_state.dark_mode = False
@@ -1678,7 +1753,15 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Map", "CPO Dashboard", "Rec
 
 # ── TAB 1: MAP ──
 with tab1:
-    filtered_df = st.session_state.filtered_data
+    # Defensive: filtered_data may be unset if the sidebar block hasn't
+    # populated it yet (e.g. data just auto-loaded from cache and the
+    # render pass hit Tab 1 first). Fall back to processed_data.
+    filtered_df = st.session_state.get("filtered_data")
+    if filtered_df is None:
+        filtered_df = st.session_state.get("processed_data")
+    if filtered_df is None:
+        import pandas as _pd_local
+        filtered_df = _pd_local.DataFrame()
     cluster_count = len(filtered_df)
 
     # Section header
@@ -2974,6 +3057,39 @@ with tab5:
                         "hexbin": _ms_hexbin_data,
                         "awb_sample": _ms_awb_data,
                     }
+
+            # ── Auto-build hexbin cache from in-memory AWB if disk cache empty ──
+            # On Streamlit Cloud, the data/awb_cache/*.json files don't survive
+            # container reboots. If we still have the AWB DataFrame in session
+            # state from this run, rebuild the hex cells on the fly.
+            if (not _ms_hexbin_data) and st.session_state.get("_awb_cached_df") is not None:
+                try:
+                    from modules.bigquery_client import _precompute_hexbin_cache
+                    _awb_in_mem = st.session_state["_awb_cached_df"]
+                    if len(_awb_in_mem) > 0:
+                        with st.spinner(f"Rebuilding hexbin overlay from {len(_awb_in_mem):,} AWB rows…"):
+                            _precompute_hexbin_cache(_awb_in_mem)
+                        _ms_hexbin_data = load_hexbin_cache()
+                        _ms_awb_data = load_awb_sample_cache()
+                        if _ms_hexbin_data:
+                            st.session_state["_ms_hex_cache"] = {
+                                "hexbin": _ms_hexbin_data,
+                                "awb_sample": _ms_awb_data,
+                            }
+                except Exception as _hex_err:
+                    st.caption(f"Hexbin auto-build skipped: {_hex_err}")
+
+            # ── Status banner so the user sees WHY hexagons may be hidden ──
+            if not _ms_hexbin_data:
+                st.info(
+                    "🔶 **AWB hexagons not available** — fetch AWB data from the "
+                    "**Data → AWB Data** tab. Once fetched, the hexagon overlay "
+                    "will appear here (toggle is auto-enabled when data exists).",
+                    icon="ℹ️",
+                )
+            else:
+                st.caption(f"🔶 AWB hexagons: **{len(_ms_hexbin_data):,}** cells loaded "
+                           f"(sample points: {len(_ms_awb_data or []):,})")
         except Exception as e:
             st.caption(f"Could not prepare map data: {e}")
 
