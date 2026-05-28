@@ -1214,15 +1214,33 @@ if not st.session_state.data_loaded:
 if 'dark_mode' not in st.session_state:
     st.session_state.dark_mode = False
 
-# ── CPO Analytics — load from Excel if present ──
+# ── CPO Analytics — lazy-load (saves ~15-40 MB on startup) ──
+# Tab 1 (Map) doesn't read cpo_analytics at all. Tabs 2/3 (CPO Dashboard,
+# Recommendations) read it. So we defer the pd.read_excel() until first
+# access via _get_cpo_analytics() below. The same instance is cached in
+# session_state once built.
 if 'cpo_analytics' not in st.session_state:
+    st.session_state.cpo_analytics = None  # sentinel — not yet attempted
+
+def _get_cpo_analytics():
+    """Return the cached CPOAnalytics instance, building it on first call.
+    Heavy (loads Excel into pandas); only call from tabs that need it."""
+    cached = st.session_state.get("cpo_analytics")
+    if cached is not None:
+        return cached
+    if st.session_state.get("_cpo_analytics_attempted"):
+        return None  # tried and there was no Excel file
+    st.session_state["_cpo_analytics_attempted"] = True
     cpo_path = APP_ROOT / "2026-02-19_cpo_with_base.xlsx"
     if not cpo_path.exists():
         cpo_path = APP_ROOT / "data" / "uploaded_cost_data.xlsx"
     if cpo_path.exists():
-        st.session_state.cpo_analytics = CPOAnalytics(excel_path=str(cpo_path))
-    else:
-        st.session_state.cpo_analytics = None
+        try:
+            st.session_state.cpo_analytics = CPOAnalytics(excel_path=str(cpo_path))
+        except Exception as e:
+            print(f"CPOAnalytics lazy-init failed: {e}")
+            st.session_state.cpo_analytics = None
+    return st.session_state.cpo_analytics
 
 # ── Authentication gate ──
 if not st.session_state.get("authenticated", False):
@@ -1677,8 +1695,10 @@ with st.sidebar:
             cpo = CPOOptimizer(excel_path=str(excel_path))
             st.session_state.processed_data = cpo.enrich_cluster_data(st.session_state.processed_data)
             st.session_state.cpo_optimizer = cpo
-        # Also refresh CPO analytics (hub-level analysis)
+        # Also refresh CPO analytics (hub-level analysis) — reset lazy guard
+        # so _get_cpo_analytics() rebuilds against the new Excel file.
         st.session_state.cpo_analytics = CPOAnalytics(excel_path=str(excel_path))
+        st.session_state["_cpo_analytics_attempted"] = True
         st.rerun()
 
     # ── Run Optimizer button (stitch: bottom of sidebar) ──
@@ -1927,7 +1947,7 @@ with tab1:
 
 # ── TAB 2: CPO DASHBOARD (Hub-Level Analytics) ──
 with tab2:
-    cpo_a: CPOAnalytics = st.session_state.get("cpo_analytics")
+    cpo_a: CPOAnalytics = _get_cpo_analytics()
 
     # Hero banner
     st.markdown("""
@@ -2378,7 +2398,7 @@ with tab2:
 
 # ── TAB 3: RECOMMENDATIONS ──
 with tab3:
-    cpo_a_r: CPOAnalytics = st.session_state.get("cpo_analytics")
+    cpo_a_r: CPOAnalytics = _get_cpo_analytics()
 
     st.markdown("""
     <div style="margin-bottom:20px;">
@@ -2894,7 +2914,31 @@ with tab5:
     _ms_awb_data = None
     _ms_hexbin_data = None
 
-    if st.session_state.get("data_loaded") and st.session_state.get("processed_data") is not None:
+    # Memo signature: rebuild heavy GeoJSON only when the filter scope or
+    # data version actually changes. Otherwise reuse the cached payload from
+    # a previous rerun — saves 1-3 seconds of CPU and avoids re-allocating
+    # tens of MB of intermediate dicts on every interaction with any sidebar
+    # widget. The signature only fingerprints small scalars / tuples; the
+    # cached payload itself lives in session_state.
+    _ms_sig = (
+        st.session_state.get("cache_date") or "",
+        tuple(st.session_state.get("selected_hubs") or ()),
+        tuple(st.session_state.get("selected_pincodes") or ()),
+        st.session_state.get("cat_filter") or "",
+        (len(st.session_state.filtered_data) if st.session_state.get("filtered_data") is not None else 0),
+    )
+    _ms_payload = st.session_state.get("_ms_payload")
+    if _ms_payload and _ms_payload.get("sig") == _ms_sig:
+        _ms_cluster_geojson = _ms_payload.get("geojson")
+        _ms_hub_list        = _ms_payload.get("hubs")
+        _ms_awb_data        = _ms_payload.get("awb")
+        _ms_hexbin_data     = _ms_payload.get("hex")
+
+    if (
+        _ms_cluster_geojson is None
+        and st.session_state.get("data_loaded")
+        and st.session_state.get("processed_data") is not None
+    ):
         try:
             from shapely.geometry import mapping as _shp_mapping, Point as _shp_Point
 
@@ -3125,6 +3169,16 @@ with tab5:
             else:
                 st.caption(f"🔶 AWB hexagons: **{len(_ms_hexbin_data):,}** cells loaded "
                            f"(sample points: {len(_ms_awb_data or []):,})")
+
+            # Memoize the Tab 5 build so future reruns (e.g. user clicks a
+            # different tab, then comes back) skip the 12k-polygon iteration.
+            st.session_state["_ms_payload"] = {
+                "sig":     _ms_sig,
+                "geojson": _ms_cluster_geojson,
+                "hubs":    _ms_hub_list,
+                "awb":     _ms_awb_data,
+                "hex":     _ms_hexbin_data,
+            }
         except Exception as e:
             st.caption(f"Could not prepare map data: {e}")
 
