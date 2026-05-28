@@ -695,17 +695,17 @@ function doExport(fmt){
   if(fmt==='geojson'){
     dlFile(JSON.stringify({type:'FeatureCollection',features},null,2),'maps-studio-'+ts+'.geojson','application/geo+json');
   }else if(fmt==='csv'){
-    const rows=[['hub_name','cluster_code','pincode','rate_num','awb_count','total_cost','surge_rate','rate_category','lat','lng','geometry_wkt','source']];
+    const rows=[['hub_name','cluster_code','pincode','rate_num','awb_count','total_cost','surge_rate','rate_category','created','modified','lat','lng','geometry_wkt','source']];
     features.forEach(f=>{
       const p=f.properties||{};
       if(f.geometry.type==='Point'){
-        rows.push([p.hub_name||'',p.cluster_code||'',p.pincode||'',p.rate_num||'',p.awb_count||'',p.total_cost||'',p.surge_rate||'',p.rate_category||'',f.geometry.coordinates[1],f.geometry.coordinates[0],'',p.source||'']);
+        rows.push([p.hub_name||'',p.cluster_code||'',p.pincode||'',p.rate_num||'',p.awb_count||'',p.total_cost||'',p.surge_rate||'',p.rate_category||'',p.created||'',p.modified||'',f.geometry.coordinates[1],f.geometry.coordinates[0],'',p.source||'']);
       }else if(f.geometry.type==='Polygon'){
         const coords=f.geometry.coordinates[0];
         let cLat=0,cLng=0;coords.forEach(c=>{cLng+=c[0];cLat+=c[1];});
         cLat/=coords.length;cLng/=coords.length;
         const wkt='POLYGON(('+coords.map(c=>c[0]+' '+c[1]).join(',')+'))';
-        rows.push([p.hub_name||'',p.cluster_code||'',p.pincode||'',p.rate_num||'',p.awb_count||'',p.total_cost||'',p.surge_rate||'',p.rate_category||'',cLat.toFixed(5),cLng.toFixed(5),wkt,p.source||'']);
+        rows.push([p.hub_name||'',p.cluster_code||'',p.pincode||'',p.rate_num||'',p.awb_count||'',p.total_cost||'',p.surge_rate||'',p.rate_category||'',p.created||'',p.modified||'',cLat.toFixed(5),cLng.toFixed(5),wkt,p.source||'']);
       }
     });
     dlFile(rows.map(r=>r.map(v=>'"'+(v+'').replace(/"/g,'""')+'"').join(',')).join('\n'),'maps-studio-'+ts+'.csv','text/csv');
@@ -819,6 +819,7 @@ function loadHubData(){
         hubMap[h.id].lat=h.lat;
         hubMap[h.id].lng=h.lng;
         hubMap[h.id].category=h.category||'';
+        hubMap[h.id].creation_date=h.creation_date||'';
       }
     });
   }
@@ -2493,6 +2494,10 @@ function openPolyEditPopup(layer,hubData){
       </select>
     </div>
     <div class="epf-row"><label>Hub Name</label><input type="text" id="_epf_hub" value="${p.hub_name||''}"/></div>
+    ${(p.created||p.modified)?`<div class="epf-readonly" style="font-size:10.5px;color:var(--muted);line-height:1.5;">
+      ${p.created?`&#128197; Created: ${p.created}<br/>`:''}
+      ${p.modified?`&#9998; Modified: ${p.modified}`:''}
+    </div>`:''}
     <div id="_epf_details" style="display:none;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:5px 7px;margin:3px 0;font-size:9.5px;line-height:1.5;max-height:100px;overflow-y:auto"></div>
     <div class="epf-actions">
       <button class="epf-save" id="_epf_save_btn">&#10003; Save</button>
@@ -2633,6 +2638,7 @@ function openHubEditPopup(hubId,marker){
     </div>
     <div class="epf-row"><label>Latitude</label><input type="number" id="_ehf_lat" value="${h.lat||''}" step="0.0001"/></div>
     <div class="epf-row"><label>Longitude</label><input type="number" id="_ehf_lng" value="${h.lng||''}" step="0.0001"/></div>
+    ${h.creation_date?`<div class="epf-readonly" style="font-size:11px;color:var(--muted);">&#128197; Hub Created: ${h.creation_date}</div>`:''}
     <div class="epf-readonly">Clusters: ${h.clusterCount} &bull; AWB: ${(h.awbCount||0).toLocaleString()} &bull; Cost: ₹${Math.round(h.totalCost||0).toLocaleString()}</div>
     <div class="epf-actions">
       <button class="epf-save" id="_ehf_save_btn">&#10003; Save</button>

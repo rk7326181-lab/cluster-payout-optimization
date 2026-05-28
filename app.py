@@ -1073,13 +1073,24 @@ def _process_and_store(cluster_df, hub_df, kepler_path=None, excel_path=None):
         processed_df = cpo_optimizer.enrich_cluster_data(processed_df)
         st.session_state.cpo_optimizer = cpo_optimizer
     if 'hub_category' not in processed_df.columns:
-        hub_cat_lookup = hub_df.set_index('id')['hub_category'].to_dict() if 'hub_category' in hub_df.columns else {}
+        hub_cat_lookup = hub_df.drop_duplicates('id').set_index('id')['hub_category'].to_dict() if 'hub_category' in hub_df.columns else {}
         processed_df['hub_category'] = processed_df['hub_id'].map(hub_cat_lookup)
-    st.session_state.cluster_data = cluster_df
+
+    # Memory: alias cluster_data → processed_df instead of keeping two copies.
+    # Downstream consumers (Tab 2/4/AWB query) only read columns that exist
+    # on processed_df. The extra `geometry`/`hub_lat`/`hub_lon`/`rate_category`
+    # columns are harmless to those readers.
+    st.session_state.cluster_data = processed_df
     st.session_state.hub_data = hub_df
     st.session_state.processed_data = processed_df
     st.session_state.kepler_path = kepler_path
     st.session_state.data_loaded = True
+
+    # Release any stale derived caches tied to the previous data shape.
+    for _k in ("_pip_awb_stats", "_pip_data_id", "_hub_pin_counts_cache", "_ms_hex_cache"):
+        st.session_state.pop(_k, None)
+    import gc as _gc
+    _gc.collect()
 
 
 def get_logo_base64():
@@ -1287,25 +1298,101 @@ with st.sidebar:
     if st.session_state.data_loaded:
         st.markdown('<div class="pn-section-label">Filters</div>', unsafe_allow_html=True)
         df = st.session_state.processed_data
+        hub_data_all = st.session_state.hub_data
 
-        hub_categories = ["All Categories"] + sorted(df['hub_category'].dropna().unique().tolist()) if 'hub_category' in df.columns else ["All Categories"]
-        selected_category = st.selectbox("Hub Category", hub_categories, key="cat_filter", label_visibility="collapsed")
+        # ── Hub Category ──
+        # Source categories from hub_data (full hub list incl. hubs with no
+        # coords) so every category appears even if its hubs have no clusters.
+        if hub_data_all is not None and 'hub_category' in hub_data_all.columns:
+            cat_values = sorted(hub_data_all['hub_category'].dropna().astype(str).unique().tolist())
+        elif 'hub_category' in df.columns:
+            cat_values = sorted(df['hub_category'].dropna().astype(str).unique().tolist())
+        else:
+            cat_values = []
+        hub_categories = ["All Categories"] + cat_values
+        selected_category = st.selectbox(
+            "Hub Category", hub_categories,
+            key="cat_filter", label_visibility="collapsed",
+        )
 
-        category_df = df.copy()
-        if selected_category != "All Categories":
-            hub_data = st.session_state.hub_data
-            matching_hub_ids = hub_data[hub_data['hub_category'] == selected_category]['id'].tolist()
-            category_df = category_df[category_df['hub_id'].isin(matching_hub_ids)]
+        # Build the filter as a single boolean mask over `df` instead of
+        # chaining `.copy()` calls — saves ~3x DataFrame allocations per rerun
+        # (matters on Streamlit Cloud's 1 GB RAM cap).
+        mask = pd.Series(True, index=df.index)
 
-        hub_names = ["All Hubs"] + sorted(category_df['hub_name'].dropna().unique().tolist())
-        selected_hub = st.selectbox("Hub Name", hub_names, key="hub_filter", label_visibility="collapsed")
+        if selected_category != "All Categories" and hub_data_all is not None and 'hub_category' in hub_data_all.columns:
+            matching_hub_ids = hub_data_all.loc[
+                hub_data_all['hub_category'].astype(str) == selected_category, 'id'
+            ].tolist()
+            mask &= df['hub_id'].isin(matching_hub_ids)
 
-        filtered_df = category_df.copy()
-        if selected_hub != "All Hubs":
-            filtered_df = filtered_df[filtered_df['hub_name'] == selected_hub]
+        # Normalized pincode series, cached once (also reused for filter logic).
+        if 'pincode' in df.columns:
+            pin_norm = (
+                df['pincode'].astype(str).str.strip()
+                .str.replace(r'\.0$', '', regex=True)
+            )
+        else:
+            pin_norm = pd.Series([""] * len(df), index=df.index)
+
+        # ── Hub Name (multiselect + built-in search) ──
+        # Options sourced from category-filtered rows (intermediate eval).
+        hub_names = sorted(df.loc[mask, 'hub_name'].dropna().unique().tolist())
+        selected_hubs = st.multiselect(
+            "Hub Name",
+            hub_names,
+            placeholder="Search hubs… (leave empty = all)",
+            key="hub_filter_ms",
+            label_visibility="collapsed",
+        )
+        if selected_hubs:
+            mask &= df['hub_name'].isin(selected_hubs)
+
+        # ── Pincode (search box + multiselect) ──
+        # Cap the options list — even if there are 15k unique pincodes,
+        # rendering them all in a multiselect blows up the page payload.
+        _PIN_OPTION_CAP = 2000
+        in_scope_pins = pin_norm[mask & (pin_norm != "")]
+        all_pincodes = sorted(in_scope_pins.unique().tolist())
+
+        pin_search = st.text_input(
+            "Pincode search",
+            placeholder="Type pincode (e.g. 560001) — filters list below",
+            key="pin_search_box",
+            label_visibility="collapsed",
+        ).strip()
+
+        if pin_search:
+            pin_options = [p for p in all_pincodes if pin_search in p][:_PIN_OPTION_CAP]
+        else:
+            pin_options = all_pincodes[:_PIN_OPTION_CAP]
+
+        _opt_label = (
+            f"Pincode filter ({len(all_pincodes):,} available"
+            + (f", showing top {_PIN_OPTION_CAP}" if len(all_pincodes) > _PIN_OPTION_CAP and not pin_search else "")
+            + ")"
+        )
+        selected_pincodes = st.multiselect(
+            "Pincodes",
+            pin_options,
+            placeholder=_opt_label,
+            key="pin_filter_ms",
+            label_visibility="collapsed",
+        )
+
+        if selected_pincodes:
+            mask &= pin_norm.isin(selected_pincodes)
+        elif pin_search:
+            mask &= pin_norm.str.contains(pin_search, na=False)
+
+        # Single view — pandas usually returns a view here, no copy. We rely on
+        # downstream consumers being read-only against filtered_data.
+        filtered_df = df[mask]
 
         st.session_state.filtered_data = filtered_df
-        st.session_state.selected_hub = selected_hub if selected_hub != "All Hubs" else None
+        st.session_state.selected_hub = selected_hubs[0] if len(selected_hubs) == 1 else None
+        st.session_state.selected_hubs = selected_hubs
+        st.session_state.selected_pincodes = selected_pincodes
 
         st.markdown("---")
 
@@ -1375,6 +1462,9 @@ with st.sidebar:
 
                     bq_progress(0.78, "📊 Generating Kepler CSV...")
                     kepler_df, kepler_path = loader.generate_kepler_csv(cluster_df, hub_df)
+                    # Memory: kepler_df is already persisted to disk; drop the
+                    # in-memory copy before we hold the (heavier) processed_df.
+                    del kepler_df
 
                     bq_progress(0.85, "📋 Saving cache manifest...")
                     loader.save_cache_manifest(cluster_path, hub_path, kepler_path)
@@ -1388,6 +1478,11 @@ with st.sidebar:
                     # Clear AWB cache so it refreshes against new clusters
                     st.session_state.pop("_awb_cached_df", None)
                     st.session_state.pop("_awb_processed_id", None)
+                    # Memory: drop local refs and force GC so the previous
+                    # data generation is fully released before rerun.
+                    del cluster_df, hub_df
+                    import gc as _gc
+                    _gc.collect()
 
                     bq_progress(1.0, "✅ Complete — all data replaced with fresh records!")
                     status_detail.empty()
@@ -2250,17 +2345,40 @@ with tab4:
 
         col_d1, col_d2, col_d3 = st.columns(3)
         date_str = datetime.now().strftime('%d%m%Y')
+
+        # Memory: cache CSV serialization across reruns so we don't rebuild
+        # the (potentially multi-MB) string on every interaction. The lambda
+        # body runs once per data version; Streamlit garbage-collects old keys.
+        @st.cache_data(show_spinner=False, max_entries=2)
+        def _df_to_csv_bytes(_df_version: str, _df: pd.DataFrame) -> bytes:
+            return _df.to_csv(index=False).encode("utf-8")
+
+        _ver = st.session_state.get("cache_date") or "local"
         with col_d1:
-            st.download_button("Download Clusters CSV", cluster_df.to_csv(index=False),
-                              f"clustering_live_{date_str}.csv", "text/csv", use_container_width=True)
+            st.download_button(
+                "Download Clusters CSV",
+                _df_to_csv_bytes(f"cl_{_ver}_{len(cluster_df)}", cluster_df),
+                f"clustering_live_{date_str}.csv", "text/csv",
+                use_container_width=True,
+            )
         with col_d2:
-            st.download_button("Download Hub Locations CSV", hub_df.to_csv(index=False),
-                              f"hub_Lat_Long{date_str}.csv", "text/csv", use_container_width=True)
+            st.download_button(
+                "Download Hub Locations CSV",
+                _df_to_csv_bytes(f"hb_{_ver}_{len(hub_df)}", hub_df),
+                f"hub_Lat_Long{date_str}.csv", "text/csv",
+                use_container_width=True,
+            )
         with col_d3:
             kp = st.session_state.get('kepler_path')
             if kp and Path(kp).exists():
-                st.download_button("Download Kepler CSV", pd.read_csv(kp).to_csv(index=False),
-                                  f"kepler_gl_final_main_{date_str}_csv.csv", "text/csv", use_container_width=True)
+                # Stream the file straight off disk — no pandas round-trip.
+                with open(kp, "rb") as _kfh:
+                    _kep_bytes = _kfh.read()
+                st.download_button(
+                    "Download Kepler CSV", _kep_bytes,
+                    f"kepler_gl_final_main_{date_str}_csv.csv", "text/csv",
+                    use_container_width=True,
+                )
             else:
                 st.caption("Kepler CSV available after BigQuery fetch")
 
@@ -2662,8 +2780,27 @@ with tab5:
         try:
             from shapely.geometry import mapping as _shp_mapping, Point as _shp_Point
 
-            _ms_proc = st.session_state.processed_data
-            _ms_hub_df = st.session_state.hub_data
+            # Use the sidebar-filtered cluster set (category / hub / pincode)
+            # so Maps Studio reflects the same scope as the Network Distribution
+            # Map. Fall back to processed_data if filtered_data isn't populated.
+            _ms_proc = st.session_state.get("filtered_data")
+            if _ms_proc is None or (hasattr(_ms_proc, "empty") and _ms_proc.empty):
+                _ms_proc = st.session_state.processed_data
+
+            # Filter hub_data to the hubs present in the filtered cluster set,
+            # union'd with any explicitly-selected hubs (so a hub with no
+            # clusters but matching the filter still shows up if selected).
+            _full_hubs = st.session_state.hub_data
+            if _full_hubs is not None and len(_ms_proc) > 0:
+                _hub_ids_in_scope = set(_ms_proc['hub_id'].dropna().unique().tolist())
+                _sel_hub_names = st.session_state.get("selected_hubs") or []
+                if _sel_hub_names:
+                    _hub_ids_in_scope |= set(
+                        _full_hubs[_full_hubs['name'].isin(_sel_hub_names)]['id'].tolist()
+                    )
+                _ms_hub_df = _full_hubs[_full_hubs['id'].isin(_hub_ids_in_scope)]
+            else:
+                _ms_hub_df = _full_hubs
             _ms_renderer = MapRenderer()
 
             # ── Fast AWB stats via DuckDB (no full DataFrame load) ──
@@ -2685,7 +2822,15 @@ with tab5:
                 if _manifest:
                     _full_hub_csv = _manifest.get("hub_csv")
                 if _full_hub_csv and Path(_full_hub_csv).exists():
-                    _loc_df = pd.read_csv(_full_hub_csv).dropna(subset=["latitude", "longitude"]).copy()
+                    # Memory: only read the columns we actually use, and force
+                    # compact dtypes — the full hub CSV can be 15k+ rows.
+                    _usecols = [c for c in ("name", "hub_name", "latitude", "longitude")]
+                    _loc_df = pd.read_csv(
+                        _full_hub_csv,
+                        usecols=lambda c: c in _usecols,
+                        dtype={"name": "string", "hub_name": "string",
+                               "latitude": "float32", "longitude": "float32"},
+                    ).dropna(subset=["latitude", "longitude"])
                     _loc_df["lat_r"] = _loc_df["latitude"].round(3)
                     _loc_df["lng_r"] = _loc_df["longitude"].round(3)
                     # Group all hub names by rounded location
@@ -2738,16 +2883,24 @@ with tab5:
                     }
 
             # ── Build cluster GeoJSON with AWB stats (vectorized) ──
-            def _rp(coords):
+            # Reduce numeric precision further when the polygon count is huge
+            # so the inline JSON payload doesn't bloat the Streamlit page
+            # (each extra decimal ≈ 1 byte per coord × ~30 coords per polygon).
+            _huge = len(_ms_proc) > 8000
+            _coord_decimals = 3 if _huge else 4
+
+            def _rp(coords, _d=_coord_decimals):
                 if isinstance(coords, (list, tuple)) and len(coords) > 0:
                     if isinstance(coords[0], (list, tuple)):
-                        return [_rp(c) for c in coords]
-                    return [round(float(v), 4) for v in coords]
+                        return [_rp(c, _d) for c in coords]
+                    return [round(float(v), _d) for v in coords]
                 return coords
 
             _valid = _ms_proc[_ms_proc['geometry'].apply(
                 lambda g: g is not None and not (hasattr(g, 'is_empty') and g.is_empty)
-            )].copy()
+            )]
+            # Memory: don't .copy() — we only read from _valid below. The
+            # original processed_data already owns the geometry objects.
 
             _ms_features = []
             # Use itertuples for ~10x speed over iterrows
@@ -2767,6 +2920,12 @@ with tab5:
                 _total_cost = _stats.get("total_cost", round(_rate * _awb_n, 1))
                 _centroid = _geom.centroid
 
+                def _fmt_dt(v):
+                    s = str(v) if v is not None else ''
+                    if s in ('', 'nan', 'NaT', 'None'):
+                        return ''
+                    return s.replace('T', ' ').split('.')[0]
+
                 _ms_features.append({
                     "type": "Feature",
                     "geometry": _geo,
@@ -2784,6 +2943,8 @@ with tab5:
                         "total_cost": _total_cost,
                         "center_lat": round(_centroid.y, 5),
                         "center_lon": round(_centroid.x, 5),
+                        "created": _fmt_dt(getattr(_t, 'created', '')),
+                        "modified": _fmt_dt(getattr(_t, 'modified', '')),
                     },
                 })
             _ms_cluster_geojson = {"type": "FeatureCollection", "features": _ms_features}
@@ -2797,6 +2958,7 @@ with tab5:
                     "lat": round(float(r["latitude"]), 5),
                     "lng": round(float(r["longitude"]), 5),
                     "category": str(r.get("hub_category", "")),
+                    "creation_date": str(r.get("creation_date", "") or ""),
                 } for r in _hub_valid.to_dict("records")]
 
             # ── Load pre-computed hexbin cache (fast, no 22M row processing) ──

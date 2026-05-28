@@ -139,6 +139,13 @@ class MapRenderer:
                 if is_large:
                     geo = self._reduce_precision(geo, 4)
 
+                def _fmt_dt(v):
+                    s = str(v) if v is not None else ''
+                    if s in ('', 'nan', 'NaT', 'None'):
+                        return ''
+                    # Trim microseconds: 2025-06-02T18:30:00.144754 → 2025-06-02 18:30:00
+                    return s.replace('T', ' ').split('.')[0]
+
                 feature = {
                     "type": "Feature",
                     "geometry": geo,
@@ -151,6 +158,8 @@ class MapRenderer:
                         "surge_rate": str(cluster_category),
                         "rate_category": str(row.get('rate_category', 'N/A')),
                         "cluster_suffix": str(row.get('cluster_suffix', 'N/A')) if 'cluster_suffix' in row.index else 'N/A',
+                        "created": _fmt_dt(row.get('created')),
+                        "modified": _fmt_dt(row.get('modified')),
                     }
                 }
                 features.append(feature)
@@ -177,9 +186,11 @@ class MapRenderer:
                     style="font-size: 12px;"
                 ),
                 popup=folium.GeoJsonPopup(
-                    fields=['cluster_code', 'hub_name', 'pincode', 'surge_rate', 'rate_category', 'cluster_suffix'],
-                    aliases=['Cluster Code', 'Hub', 'Pincode', 'Surge Rate', 'Category', 'Cluster ID'],
-                    max_width=300,
+                    fields=['cluster_code', 'hub_name', 'pincode', 'surge_rate',
+                            'rate_category', 'cluster_suffix', 'created', 'modified'],
+                    aliases=['Cluster Code', 'Hub', 'Pincode', 'Surge Rate',
+                             'Category', 'Cluster ID', 'Created', 'Modified'],
+                    max_width=320,
                     style="font-size: 12px;"
                 ),
             )
@@ -229,8 +240,14 @@ class MapRenderer:
                     ).add_to(m)
 
         # ── Hub markers ──
+        # Skip hubs without coordinates — the raw hub_data may now contain
+        # rows with NaN lat/long (BigQuery fetch keeps all rows).
         if show_hub_markers:
-            relevant_hubs = hub_df[hub_df['id'].isin(cluster_df['hub_id'].unique())]
+            relevant_hubs = hub_df[
+                hub_df['id'].isin(cluster_df['hub_id'].unique())
+                & hub_df['latitude'].notna()
+                & hub_df['longitude'].notna()
+            ]
             for idx, hub in relevant_hubs.iterrows():
                 self._add_hub_marker(m, hub)
 
@@ -254,8 +271,20 @@ class MapRenderer:
             </svg>
             """
 
+            _created = str(hub_row.get('creation_date', '') or '').strip()
+            if _created.lower() in ('nan', 'nat', 'none'):
+                _created = ''
+            _created_row = (
+                f"""
+                    <tr>
+                        <td style='padding: 5px; font-weight: bold;'>Hub Created:</td>
+                        <td style='padding: 5px;'>{_created}</td>
+                    </tr>
+                """ if _created else ""
+            )
+
             popup_html = f"""
-            <div style='width: 220px; font-family: Inter, Arial, sans-serif;'>
+            <div style='width: 240px; font-family: Inter, Arial, sans-serif;'>
                 <h4 style='margin: 0 0 10px 0; color: #1b1c1c; border-bottom: 2px solid #008A71; padding-bottom: 5px;
                     font-family: Montserrat, sans-serif; font-size: 13px;'>
                     {hub_row['name']}
@@ -269,6 +298,7 @@ class MapRenderer:
                         <td style='padding: 5px; font-weight: bold;'>Category:</td>
                         <td style='padding: 5px;'>{hub_row.get('hub_category', 'N/A')}</td>
                     </tr>
+                    {_created_row}
                     <tr style='background-color: rgba(0,138,113,0.06);'>
                         <td style='padding: 5px; font-weight: bold;'>Latitude:</td>
                         <td style='padding: 5px;'>{hub_row['latitude']:.6f}</td>

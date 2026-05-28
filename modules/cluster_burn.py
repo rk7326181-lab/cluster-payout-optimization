@@ -401,8 +401,12 @@ def render_burn_tab(bq_client=None):
     # ════════════════════════════════════════
     st.markdown("<div style='height:16px'></div>", unsafe_allow_html=True)
     st.markdown(
-        '<div class="pn-section-label" style="margin-bottom:8px;">Step 3 — Upload CSV Files</div>',
+        '<div class="pn-section-label" style="margin-bottom:8px;">Step 3 — Upload Cluster Polygon CSVs</div>',
         unsafe_allow_html=True,
+    )
+    st.caption(
+        "Upload **two** cluster-polygon CSVs (WKT + name + description). "
+        "Burn is computed independently for each, then compared side-by-side."
     )
     col_f1, col_f2 = st.columns(2)
     with col_f1:
@@ -418,16 +422,20 @@ def render_burn_tab(bq_client=None):
             st.caption("_Not uploaded — will use `Live5.csv` as fallback_")
 
     with col_f2:
-        st.markdown("**Pincode boundaries CSV** *(optional)*")
-        pincode_file = st.file_uploader(
-            "Pincode map  (columns: pincode, description)",
-            type=["csv"], key="burn_pincode_csv",
+        st.markdown("**Cluster polygons — Live CSV #2 (live1.csv)** *(required)*")
+        live_file2 = st.file_uploader(
+            "Second WKT polygon set (columns: WKT, name, description)",
+            type=["csv"], key="burn_live_csv2",
             label_visibility="collapsed",
         )
-        if pincode_file:
-            st.success(f"✅ {pincode_file.name}")
+        if live_file2:
+            st.success(f"✅ {live_file2.name}")
         else:
-            st.caption("_Not uploaded — built-in defaults used_")
+            st.caption("_Upload the second polygon CSV to enable the comparison_")
+
+    # Pincode CSV uploader removed — pincode-based fallback is disabled when
+    # two cluster polygon CSVs drive the comparison.
+    pincode_file = None
 
     # ════════════════════════════════════════
     # PREVIEW CARD
@@ -481,11 +489,11 @@ def render_burn_tab(bq_client=None):
         <span style="color:{_muted};font-size:12px;">({date_from} → {date_to})</span>
       </div>
       <div style="border-top:1px solid {_border};padding-top:10px;font-size:12px;color:{_text};">
-        <div><span style="color:{_muted};min-width:110px;display:inline-block;">Live CSV:</span>
+        <div><span style="color:{_muted};min-width:130px;display:inline-block;">Live CSV #1:</span>
              {_fname(live_file, "Not uploaded — will use Live5.csv")}</div>
         <div style="margin-top:4px;">
-             <span style="color:{_muted};min-width:110px;display:inline-block;">Pincode CSV:</span>
-             {_fname(pincode_file, "Not uploaded — built-in defaults")}</div>
+             <span style="color:{_muted};min-width:130px;display:inline-block;">Live CSV #2:</span>
+             {_fname(live_file2, "Not uploaded — comparison disabled")}</div>
       </div>
     </div>
     """, unsafe_allow_html=True)
@@ -503,12 +511,12 @@ def render_burn_tab(bq_client=None):
     )
 
     if st.button(
-        "▶  Fetch AWB & Calculate Burn",
+        "▶  Fetch AWB & Calculate Burn (both CSVs)",
         key="burn_run_btn",
         type="primary",
         disabled=run_disabled,
         use_container_width=False,
-        help=run_tip or "Fetch AWB data and compute P&L",
+        help=run_tip or "Fetch AWB data and compute P&L for both CSVs",
     ):
         # 4a. Fetch AWB
         with st.spinner(f"Fetching AWB data for {len(selected_ids)} hub(s), last {int(days_back)} days…"):
@@ -524,101 +532,208 @@ def render_burn_tab(bq_client=None):
 
         st.success(f"✅ {len(awb_df):,} AWB records fetched")
 
-        # 4b. Load cluster polygons
-        clusters, skipped = (
-            calc.load_clusters(live_file)
-            if live_file
-            else ([], [])
-        )
-        if not clusters:
-            from pathlib import Path as _Path
-            _fallback = _Path("Live5.csv")
-            if _fallback.exists():
-                with st.spinner("No upload — loading fallback Live5.csv…"):
-                    clusters, skipped = calc.load_clusters(str(_fallback))
-            else:
-                st.warning("No Live CSV uploaded and Live5.csv not found. "
-                           "Cluster assignment will use pincode fallback only.")
-                clusters = []
+        # 4b. Load BOTH cluster polygon sets
+        def _load_csv(file_obj, label, fallback_path=None):
+            clusters, skipped = (calc.load_clusters(file_obj) if file_obj else ([], []))
+            if not clusters and fallback_path is not None:
+                from pathlib import Path as _Path
+                fb = _Path(fallback_path)
+                if fb.exists():
+                    with st.spinner(f"No upload for {label} — loading fallback {fb.name}…"):
+                        clusters, skipped = calc.load_clusters(str(fb))
+            return clusters, skipped
 
-        if skipped:
-            with st.expander(f"⚠ {len(skipped)} polygon row(s) skipped"):
-                for s in skipped:
-                    st.caption(f"Row {s[0]} | {s[1]} | {s[2]}")
+        clusters1, skipped1 = _load_csv(live_file, "Live CSV #1", "Live5.csv")
+        clusters2, skipped2 = _load_csv(live_file2, "Live CSV #2", None)
 
-        if clusters:
-            st.caption(f"Cluster polygons loaded: **{len(clusters)}**")
+        if not clusters1:
+            st.error("Live CSV #1 produced no usable polygons. Upload a valid WKT CSV.")
+            return
+        if not clusters2:
+            st.error("Live CSV #2 (live1.csv) is required for the comparison. Upload it and re-run.")
+            return
 
-        # 4c. Load pincode map
-        pincode_map = calc.load_pincode_map(pincode_file)
+        for label, skipped in (("Live CSV #1", skipped1), ("Live CSV #2", skipped2)):
+            if skipped:
+                with st.expander(f"⚠ {len(skipped)} polygon row(s) skipped in {label}"):
+                    for s in skipped:
+                        st.caption(f"Row {s[0]} | {s[1]} | {s[2]}")
 
-        # 4d. Assign clusters
-        with st.spinner(f"Assigning clusters to {len(awb_df):,} AWB points…"):
-            result_df = calc.assign_clusters(awb_df, clusters, pincode_map)
+        st.caption(f"Polygons loaded — CSV #1: **{len(clusters1)}**  ·  CSV #2: **{len(clusters2)}**")
 
-        # 4e. P&L
-        pnl_df = calc.calculate_pnl(result_df)
+        # 4c. Empty pincode map (we no longer use pincode fallback)
+        pincode_map = {}
 
-        st.session_state["burn_pnl_df"]    = pnl_df
-        st.session_state["burn_result_df"] = result_df
+        # 4d. Assign clusters for each set, then compute P&L
+        with st.spinner(f"Assigning clusters (CSV #1) to {len(awb_df):,} AWB points…"):
+            result_df1 = calc.assign_clusters(awb_df, clusters1, pincode_map)
+        with st.spinner(f"Assigning clusters (CSV #2) to {len(awb_df):,} AWB points…"):
+            result_df2 = calc.assign_clusters(awb_df, clusters2, pincode_map)
+
+        pnl_df1 = calc.calculate_pnl(result_df1)
+        pnl_df2 = calc.calculate_pnl(result_df2)
+
+        # Store both runs
+        st.session_state["burn_pnl_df"]   = pnl_df1   # kept for legacy downloads
+        st.session_state["burn_pnl_df1"]  = pnl_df1
+        st.session_state["burn_pnl_df2"]  = pnl_df2
+        st.session_state["burn_result_df1"] = result_df1
+        st.session_state["burn_result_df2"] = result_df2
+        st.session_state["burn_csv1_label"] = live_file.name if live_file else "Live5.csv"
+        st.session_state["burn_csv2_label"] = live_file2.name if live_file2 else "live1.csv"
 
     # ════════════════════════════════════════
-    # RESULTS
+    # RESULTS — TWO TABLES + COMPARISON
     # ════════════════════════════════════════
-    pnl_df = st.session_state.get("burn_pnl_df")
+    pnl_df1 = st.session_state.get("burn_pnl_df1")
+    pnl_df2 = st.session_state.get("burn_pnl_df2")
+    csv1_label = st.session_state.get("burn_csv1_label", "Live CSV #1")
+    csv2_label = st.session_state.get("burn_csv2_label", "Live CSV #2")
 
-    if pnl_df is not None and not pnl_df.empty:
+    def _summary(df):
+        if df is None or df.empty:
+            return 0, 0.0, 0.0, 0.0
+        return len(df), df["Saving"].sum(), df["Burning"].sum(), df["P & L"].sum()
+
+    def _flat_pivot(df):
+        """Hub × metric flat DataFrame (no styler) for diff arithmetic & download."""
+        if df is None or df.empty:
+            return pd.DataFrame(columns=["hub", "Expt_Pincode_Pay", "Cluster_Payout",
+                                         "Saving", "Burning", "P & L", "P & L %"])
+        p = df.pivot_table(
+            index="hub",
+            values=["Pin_Pay", "Clustering_payout", "Saving", "Burning", "P & L"],
+            aggfunc="sum", margins=True, margins_name="Grand Total",
+        ).reset_index().rename(columns={
+            "Pin_Pay": "Expt_Pincode_Pay",
+            "Clustering_payout": "Cluster_Payout",
+        })
+        num = ["Expt_Pincode_Pay", "Cluster_Payout", "Saving", "Burning", "P & L"]
+        p[num] = p[num].apply(pd.to_numeric, errors="coerce")
+        p["P & L %"] = (p["P & L"] / p["Expt_Pincode_Pay"].replace(0, pd.NA) * 100).round(2)
+        return p[["hub"] + num + ["P & L %"]]
+
+    have_results = (pnl_df1 is not None and not pnl_df1.empty) or \
+                   (pnl_df2 is not None and not pnl_df2.empty)
+
+    if have_results:
         st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
         st.markdown(
-            '<div class="pn-section-label" style="margin-bottom:8px;">Results — P&L Report</div>',
+            '<div class="pn-section-label" style="margin-bottom:8px;">Results — P&L Report (both CSVs)</div>',
             unsafe_allow_html=True,
         )
 
-        # ── Summary metric cards ──────────────────────────────────────────────
-        total_saving  = pnl_df["Saving"].sum()
-        total_burning = pnl_df["Burning"].sum()
-        total_pnl     = pnl_df["P & L"].sum()
-        total_awb     = len(pnl_df)
-        pnl_color     = _green if total_pnl >= 0 else "#ba1a1a"
+        # ── Side-by-side summary metrics ──────────────────────────────────────
+        t1, s1, b1, n1 = _summary(pnl_df1)
+        t2, s2, b2, n2 = _summary(pnl_df2)
 
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Total AWBs",      f"{total_awb:,}")
-        m2.metric("Total Saving",    f"₹{total_saving:,.1f}")
-        m3.metric("Total Burning",   f"₹{total_burning:,.1f}")
-        m4.metric("Net P & L",       f"₹{total_pnl:,.1f}",
-                  delta=f"{'▲' if total_pnl >= 0 else '▼'} {abs(total_pnl):,.1f}")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown(f"**CSV #1 — {csv1_label}**")
+            mA, mB, mC, mD = st.columns(4)
+            mA.metric("AWBs", f"{t1:,}")
+            mB.metric("Saving", f"₹{s1:,.1f}")
+            mC.metric("Burning", f"₹{b1:,.1f}")
+            mD.metric("Net P&L", f"₹{n1:,.1f}",
+                      delta=f"{'▲' if n1 >= 0 else '▼'} {abs(n1):,.1f}")
+        with c2:
+            st.markdown(f"**CSV #2 — {csv2_label}**")
+            mA, mB, mC, mD = st.columns(4)
+            mA.metric("AWBs", f"{t2:,}")
+            mB.metric("Saving", f"₹{s2:,.1f}")
+            mC.metric("Burning", f"₹{b2:,.1f}")
+            mD.metric("Net P&L", f"₹{n2:,.1f}",
+                      delta=f"{'▲' if n2 >= 0 else '▼'} {abs(n2):,.1f}")
 
         st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-        # ── Pivot table ───────────────────────────────────────────────────────
-        st.markdown("#### Hub-level P&L Pivot")
-        styled = calc.build_pivot(pnl_df)
-        st.dataframe(styled, use_container_width=True)
+        # ── Two pivot tables side-by-side ─────────────────────────────────────
+        tcol1, tcol2 = st.columns(2)
+        with tcol1:
+            st.markdown(f"#### Hub-level P&L — CSV #1 ({csv1_label})")
+            if pnl_df1 is not None and not pnl_df1.empty:
+                st.dataframe(calc.build_pivot(pnl_df1), use_container_width=True)
+            else:
+                st.info("No results for CSV #1.")
+        with tcol2:
+            st.markdown(f"#### Hub-level P&L — CSV #2 ({csv2_label})")
+            if pnl_df2 is not None and not pnl_df2.empty:
+                st.dataframe(calc.build_pivot(pnl_df2), use_container_width=True)
+            else:
+                st.info("No results for CSV #2.")
+
+        # ── Comparison / diff table ───────────────────────────────────────────
+        st.markdown("<div style='height:18px'></div>", unsafe_allow_html=True)
+        st.markdown("#### Comparison — CSV #2 vs CSV #1 (Δ per hub)")
+
+        flat1 = _flat_pivot(pnl_df1).set_index("hub")
+        flat2 = _flat_pivot(pnl_df2).set_index("hub")
+        cols = ["Expt_Pincode_Pay", "Cluster_Payout", "Saving", "Burning", "P & L"]
+        diff = pd.DataFrame(index=sorted(set(flat1.index) | set(flat2.index)))
+        for c in cols:
+            v1 = flat1[c].reindex(diff.index).fillna(0)
+            v2 = flat2[c].reindex(diff.index).fillna(0)
+            diff[f"{c} (CSV1)"] = v1
+            diff[f"{c} (CSV2)"] = v2
+            diff[f"Δ {c}"] = (v2 - v1).round(2)
+
+        # Move Grand Total to the top, sort rest by |Δ P & L| desc
+        diff = diff.reset_index().rename(columns={"index": "hub"})
+        gt   = diff[diff["hub"] == "Grand Total"]
+        rest = diff[diff["hub"] != "Grand Total"].assign(
+            _abs=lambda d: d["Δ P & L"].abs()
+        ).sort_values("_abs", ascending=False).drop(columns="_abs")
+        diff = pd.concat([gt, rest], ignore_index=True)
+
+        # Color the Δ columns
+        delta_cols = [c for c in diff.columns if c.startswith("Δ ")]
+        styled_diff = (
+            diff.set_index("hub").style
+                .map(
+                    lambda v: ("color:green" if v > 0 else "color:red")
+                    if isinstance(v, (int, float)) else "",
+                    subset=delta_cols,
+                )
+                .format({c: "{:,.0f}" for c in diff.columns if c != "hub"})
+                .set_properties(**{"text-align": "center"})
+                .set_table_styles([{"selector": "th", "props": [
+                    ("text-align", "center"), ("font-weight", "bold"),
+                    ("background-color", "#fde68a"),
+                ]}])
+        )
+        st.dataframe(styled_diff, use_container_width=True)
 
         # ── Download buttons ──────────────────────────────────────────────────
-        col_d1, col_d2, _ = st.columns([2, 2, 6])
-        with col_d1:
+        st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
+        dc1, dc2, dc3 = st.columns(3)
+        with dc1:
+            if pnl_df1 is not None and not pnl_df1.empty:
+                st.download_button(
+                    "⬇ CSV #1 raw (csv)",
+                    data=pnl_df1.to_csv(index=False).encode("utf-8"),
+                    file_name="cluster_burn_csv1_raw.csv",
+                    mime="text/csv", key="burn_dl_raw1",
+                )
+        with dc2:
+            if pnl_df2 is not None and not pnl_df2.empty:
+                st.download_button(
+                    "⬇ CSV #2 raw (csv)",
+                    data=pnl_df2.to_csv(index=False).encode("utf-8"),
+                    file_name="cluster_burn_csv2_raw.csv",
+                    mime="text/csv", key="burn_dl_raw2",
+                )
+        with dc3:
             st.download_button(
-                "⬇ Download raw data (CSV)",
-                data=pnl_df.to_csv(index=False).encode("utf-8"),
-                file_name="cluster_burn_raw.csv",
-                mime="text/csv",
-                key="burn_dl_raw",
-            )
-        with col_d2:
-            pivot_df = pnl_df.pivot_table(
-                index="hub",
-                values=["Pin_Pay", "Clustering_payout", "Saving", "Burning", "P & L"],
-                aggfunc="sum", margins=True, margins_name="Grand Total",
-            ).reset_index()
-            st.download_button(
-                "⬇ Download pivot (CSV)",
-                data=pivot_df.to_csv(index=False).encode("utf-8"),
-                file_name="cluster_burn_pivot.csv",
-                mime="text/csv",
-                key="burn_dl_pivot",
+                "⬇ Diff table (csv)",
+                data=diff.to_csv(index=False).encode("utf-8"),
+                file_name="cluster_burn_diff.csv",
+                mime="text/csv", key="burn_dl_diff",
             )
 
-        # ── Expandable raw data table ─────────────────────────────────────────
-        with st.expander("View raw AWB data"):
-            st.dataframe(pnl_df, use_container_width=True, height=320)
+        # ── Expandable raw data tables ────────────────────────────────────────
+        with st.expander("View raw AWB data — CSV #1"):
+            if pnl_df1 is not None:
+                st.dataframe(pnl_df1, use_container_width=True, height=320)
+        with st.expander("View raw AWB data — CSV #2"):
+            if pnl_df2 is not None:
+                st.dataframe(pnl_df2, use_container_width=True, height=320)

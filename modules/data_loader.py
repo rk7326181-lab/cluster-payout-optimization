@@ -365,18 +365,25 @@ class DataLoader:
         return df
     
     def _clean_hub_data(self, df):
-        """Clean and standardize hub data"""
+        """Clean and standardize hub data.
+
+        Keeps ALL rows (including hubs without lat/long) so Data Explorer and
+        downloads match the raw BigQuery console output (e.g. ~15.6k rows).
+        Downstream map rendering must skip rows with NaN coords on its own.
+        """
         # Rename columns if needed
         if 'name' not in df.columns and 'hub_name' in df.columns:
             df = df.rename(columns={'hub_name': 'name'})
-        
-        # Ensure numeric coordinates
+
+        # Ensure numeric coordinates (invalid → NaN, kept)
         df['latitude'] = pd.to_numeric(df['latitude'], errors='coerce')
         df['longitude'] = pd.to_numeric(df['longitude'], errors='coerce')
-        
-        # Remove rows with missing coordinates
-        df = df.dropna(subset=['latitude', 'longitude'])
-        
+
+        # Normalize creation_date column (kept as-is if present) so the hub
+        # marker popup and CSV download can show it.
+        if 'creation_date' in df.columns:
+            df['creation_date'] = df['creation_date'].astype(str).replace({'NaT': '', 'nan': ''})
+
         return df
     
     def process_data(self, cluster_df, hub_df):
@@ -416,7 +423,10 @@ class DataLoader:
         
         # Merge with hub data to get hub coordinates if not already present
         if 'hub_lat' not in processed_df.columns or 'hub_lon' not in processed_df.columns:
-            hub_lookup = hub_df.set_index('id')[['latitude', 'longitude']].to_dict('index')
+            # De-dup on id (hub_data now keeps all rows incl. NaN coords;
+            # ensure set_index doesn't choke on duplicates).
+            _hub_unique = hub_df.drop_duplicates(subset=['id'], keep='first')
+            hub_lookup = _hub_unique.set_index('id')[['latitude', 'longitude']].to_dict('index')
             
             processed_df['hub_lat'] = processed_df['hub_id'].map(
                 lambda x: hub_lookup.get(x, {}).get('latitude', None)
