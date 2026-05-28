@@ -56,22 +56,45 @@ class DataLoader:
         # Read token from env first, then Streamlit secrets. `st.secrets`
         # raises StreamlitSecretNotFoundError when no secrets file exists
         # at all (typical local dev) — guard each access independently.
-        token = os.environ.get("GH_TOKEN")
+        # We also probe a few common nested locations because TOML places
+        # any bare `KEY = "x"` AFTER a [section] header inside that section,
+        # so users frequently end up with the token at e.g.
+        # st.secrets["users"]["GH_TOKEN"] without realising.
+        token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+        token_source = "env" if token else None
         if not token:
             try:
                 import streamlit as st
-                try:
-                    token = st.secrets["GH_TOKEN"]
-                except Exception:
-                    # Some Streamlit versions expose .get; try as fallback.
+                # Probe paths in order of likelihood.
+                probes = [
+                    ("GH_TOKEN",),
+                    ("GITHUB_TOKEN",),
+                    ("github", "token"),
+                    ("github", "pat"),
+                    ("github", "GH_TOKEN"),
+                    ("users", "GH_TOKEN"),       # common TOML mistake
+                    ("auth", "GH_TOKEN"),
+                ]
+                for path in probes:
                     try:
-                        token = st.secrets.get("GH_TOKEN")
+                        v = st.secrets
+                        for p in path:
+                            v = v[p]
+                        if v:
+                            token = str(v)
+                            token_source = "secrets:" + ".".join(path)
+                            break
                     except Exception:
-                        token = None
+                        continue
             except Exception:
                 token = None
         if not token:
-            return False, "GH_TOKEN not set — skipping git persistence"
+            return False, (
+                "GH_TOKEN not set — skipping git persistence. "
+                "Place `GH_TOKEN = \"…\"` at the TOP of secrets.toml "
+                "(before any [section] header)."
+            )
+        print(f"persist_cache_to_git: using token from {token_source}")
 
         repo_root = Path(__file__).parent.parent
         if not (repo_root / ".git").exists():
