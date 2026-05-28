@@ -48,8 +48,19 @@ service_account.json
 *.geojson
 *.parquet
 Awb_with_polygon_mapping.csv
-data/
-awb_cache/
+
+# data/ default: ignore everything inside…
+data/*
+# …but ALLOW the small map snapshot files so the deployed app survives
+# Streamlit Cloud reboots (container disk is wiped, but the git checkout
+# brings these back). awb_cache/ + hexbin_cache.json stay ignored (huge).
+!data/cache_manifest.json
+!data/clustering_live_*.csv
+!data/hub_Lat_Long*.csv
+!data/kepler_gl_final_main_*_csv.csv
+!data/live_clusters_cache.json
+data/awb_cache/
+data/awb_cache/**
 hexbin_cache.json
 
 # Code review / auxiliary caches

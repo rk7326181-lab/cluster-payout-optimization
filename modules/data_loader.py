@@ -38,33 +38,112 @@ class DataLoader:
     def _manifest_path(self):
         return self.project_root / self.CACHE_MANIFEST
 
+    def _to_rel(self, p):
+        """Convert any path to one relative to project_root (POSIX) so the
+        manifest survives moving between machines (Windows ↔ Streamlit Cloud).
+        Falls back to the original string if the path can't be relativised."""
+        try:
+            return Path(p).resolve().relative_to(self.project_root.resolve()).as_posix()
+        except Exception:
+            return str(p)
+
+    def _resolve_path(self, p):
+        """Resolve a manifest path that may be relative-to-project-root OR an
+        old-style Windows absolute path. Returns a Path or None if not found."""
+        if not p:
+            return None
+        cand = Path(p)
+        if cand.is_absolute():
+            if cand.exists():
+                return cand
+            # Old manifest from Windows — try just the filename in data/
+            cand = self.project_root / "data" / cand.name
+            return cand if cand.exists() else None
+        # Relative path
+        cand = self.project_root / p
+        return cand if cand.exists() else None
+
     def save_cache_manifest(self, cluster_path, hub_path, kepler_path):
-        """Write a small JSON that records which files were last saved and when."""
+        """Write a small JSON that records which files were last saved and when.
+        Paths are stored RELATIVE to project_root so the manifest is portable
+        across machines (committing the data + manifest to git lets the
+        deployed app load it after a container restart)."""
         manifest = {
-            "cluster_csv": str(cluster_path),
-            "hub_csv": str(hub_path),
-            "kepler_csv": str(kepler_path),
+            "cluster_csv": self._to_rel(cluster_path),
+            "hub_csv":     self._to_rel(hub_path),
+            "kepler_csv":  self._to_rel(kepler_path),
             "fetched_date": datetime.now().strftime("%Y-%m-%d"),
             "fetched_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
+        self._manifest_path().parent.mkdir(parents=True, exist_ok=True)
         with open(self._manifest_path(), "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
+    def _discover_latest_in_data_dir(self):
+        """If the manifest is missing or stale, look for the most recent
+        clusters/hub/kepler trio inside `data/` (any date) and synthesize a
+        manifest pointing at them. Returns a dict or None."""
+        data_dir = self.project_root / "data"
+        if not data_dir.exists():
+            return None
+        clusters = sorted(data_dir.glob("clustering_live_*.csv"))
+        hubs     = sorted(data_dir.glob("hub_Lat_Long*.csv"))
+        keplers  = sorted(data_dir.glob("kepler_gl_final_main_*_csv.csv"))
+        if not (clusters and hubs and keplers):
+            return None
+        # Most recently modified wins for each.
+        cluster_p = max(clusters, key=lambda p: p.stat().st_mtime)
+        hub_p     = max(hubs,     key=lambda p: p.stat().st_mtime)
+        kepler_p  = max(keplers,  key=lambda p: p.stat().st_mtime)
+        return {
+            "cluster_csv": self._to_rel(cluster_p),
+            "hub_csv":     self._to_rel(hub_p),
+            "kepler_csv":  self._to_rel(kepler_p),
+            "fetched_date": datetime.fromtimestamp(kepler_p.stat().st_mtime).strftime("%Y-%m-%d"),
+            "fetched_time": datetime.fromtimestamp(kepler_p.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+            "_synthesized": True,
+        }
+
     def get_cache_manifest(self):
-        """Return the manifest dict, or None if no cached data exists."""
+        """Return the manifest dict, or None if no usable cached data exists.
+
+        Resolution order:
+          1. Read data/cache_manifest.json. If its 3 files all resolve, return.
+          2. Else scan data/ for the most recent clusters/hubs/kepler trio and
+             return a synthesized manifest pointing at them (so the deployed
+             app can load CSVs committed to git even without a manifest)."""
         mp = self._manifest_path()
-        if not mp.exists():
+        if mp.exists():
+            try:
+                with open(mp, "r", encoding="utf-8") as f:
+                    raw = json.load(f)
+                resolved = {}
+                ok = True
+                for key in ("cluster_csv", "hub_csv", "kepler_csv"):
+                    p = self._resolve_path(raw.get(key))
+                    if p is None:
+                        ok = False
+                        break
+                    resolved[key] = str(p)
+                if ok:
+                    resolved["fetched_date"] = raw.get("fetched_date", "")
+                    resolved["fetched_time"] = raw.get("fetched_time", "")
+                    return resolved
+            except Exception:
+                pass
+
+        # Fallback: discover from data/ on disk (covers git-committed data
+        # with no/stale manifest).
+        synth = self._discover_latest_in_data_dir()
+        if synth is None:
             return None
-        try:
-            with open(mp, "r", encoding="utf-8") as f:
-                manifest = json.load(f)
-            # Verify all three files still exist on disk
-            for key in ("cluster_csv", "hub_csv", "kepler_csv"):
-                if not Path(manifest[key]).exists():
-                    return None
-            return manifest
-        except Exception:
-            return None
+        # Resolve to absolute strings before returning.
+        for key in ("cluster_csv", "hub_csv", "kepler_csv"):
+            p = self._resolve_path(synth[key])
+            if p is None:
+                return None
+            synth[key] = str(p)
+        return synth
 
     def load_cached_data(self):
         """Load the most recently fetched data from disk (no BigQuery call).
