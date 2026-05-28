@@ -8,7 +8,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import sys, time, base64
+import sys, os, time, base64
 from pathlib import Path
 
 sys.path.append(str(Path(__file__).parent / "modules"))
@@ -1120,9 +1120,14 @@ if 'data_loaded' not in st.session_state:
     st.session_state.cache_date = None
 elif 'filtered_data' not in st.session_state:
     # Older session: initialise the new key so Tab 1 never KeyErrors before
-    # the sidebar filter block (which sets it) has had a chance to run.
+    # the sidebar filter block has had a chance to populate it.
     st.session_state.filtered_data = st.session_state.get("processed_data")
 
+# ── ONE-TIME cache hydration (runs on first script execution of any session) ──
+# This MUST be at module level (not inside the cold-init branch) so it runs
+# both on a fresh Streamlit Cloud container and on subsequent reruns where
+# data_loaded already exists but is still False.
+if not st.session_state.data_loaded:
     loader = DataLoader()
     manifest = loader.get_cache_manifest()
     if manifest:
@@ -1132,8 +1137,9 @@ elif 'filtered_data' not in st.session_state:
             _process_and_store(cluster_df, hub_df, kepler_path=kepler_path,
                               excel_path=str(excel_path) if excel_path.exists() else None)
             st.session_state.cache_date = manifest.get("fetched_time", manifest.get("fetched_date", ""))
-        except Exception:
-            pass
+        except Exception as _hyd_err:
+            # Don't crash app on a corrupt cache — fall through to fetch UI.
+            print(f"Cache hydration skipped: {_hyd_err}")
 
     # ── Auto-fetch from BigQuery on startup if no local cache ──────────────
     # On Streamlit Cloud the `data/` directory is wiped on container reboot,
@@ -2469,7 +2475,13 @@ with tab4:
 
         ptab1, ptab2, ptab3, ptab4 = st.tabs(["Clusters Preview", "Hub Locations Preview", "AWB Data", "Serviceability"])
         with ptab1:
-            st.dataframe(cluster_df.head(100), use_container_width=True, hide_index=True)
+            # Drop Shapely-object columns before st.dataframe — Arrow can't
+            # serialize Polygon objects (causes a noisy "auto-fix" warning).
+            _preview = cluster_df.head(100).drop(
+                columns=[c for c in ("geometry",) if c in cluster_df.columns],
+                errors="ignore",
+            )
+            st.dataframe(_preview, use_container_width=True, hide_index=True)
         with ptab2:
             st.dataframe(hub_df.head(100), use_container_width=True, hide_index=True)
 
