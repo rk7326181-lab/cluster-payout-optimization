@@ -515,7 +515,12 @@ def fetch_live_clusters(client, force_refresh=False, progress_cb=None):
 
         if progress_cb:
             progress_cb(0.32, "⬇️ Downloading cluster results...")
-        result = query_job.to_dataframe()
+        # Force REST download (create_bqstorage_client=False) — the BQ Storage
+        # Read API needs `bigquery.readsessions.create` which many OAuth users
+        # lack, and the result set (~12k rows) is small enough that REST is
+        # fine. _safe_to_dataframe gracefully handles older SDK versions and
+        # falls back to REST if bqstorage perms are missing.
+        result = _safe_to_dataframe(query_job, use_bqstorage=False)
 
         # Save to cache
         _save_live_clusters_cache(result)
@@ -550,7 +555,8 @@ def fetch_hub_locations(client, year, month, progress_cb=None):
 
         if progress_cb:
             progress_cb(0.56, "⬇️ Downloading hub results...")
-        result = query_job.to_dataframe()
+        # Force REST — hub set is ~15k rows, trivially small.
+        result = _safe_to_dataframe(query_job, use_bqstorage=False)
 
         if progress_cb:
             progress_cb(0.60, f"✅ {len(result):,} hub locations fetched")
@@ -1257,21 +1263,52 @@ def _stream_to_parquet(query_job, parquet_path, progress_cb=None, start_pct=0.72
     return rows_written
 
 
-def _safe_to_dataframe(query_job):
-    """to_dataframe(create_bqstorage_client=True) when bqstorage is installed,
-    else regular to_dataframe(). Used only as a last resort."""
+def _safe_to_dataframe(query_job, use_bqstorage=True):
+    """
+    Wrap query_job.to_dataframe() so the caller can opt out of BQ Storage
+    Read API. The Storage API needs `bigquery.readsessions.create` which
+    many OAuth users / org policies don't grant — when that permission is
+    missing we transparently retry over plain REST so the fetch still works.
+
+    `use_bqstorage`: True (default) tries the Storage API first; False
+    forces REST from the start.
+    """
+    def _rest():
+        try:
+            return query_job.to_dataframe(create_bqstorage_client=False)
+        except TypeError:
+            return query_job.to_dataframe()
+
+    if not use_bqstorage:
+        return _rest()
+
     try:
         return query_job.to_dataframe(create_bqstorage_client=True)
     except TypeError:
         # Older google-cloud-bigquery without the kwarg
         return query_job.to_dataframe()
-    except Exception:
-        return query_job.to_dataframe()
+    except Exception as e:
+        msg = str(e)
+        # Permission denied for readsessions, or service unavailable — fall
+        # back to REST. Anything else: re-raise so the caller sees the real
+        # error instead of silently masking it.
+        if (
+            "readsessions" in msg.lower()
+            or "bigquery.readsessions.create" in msg
+            or "403" in msg
+            or "PERMISSION_DENIED" in msg
+        ):
+            print(f"bqstorage unavailable ({msg.splitlines()[0][:120]}) — using REST")
+            return _rest()
+        raise
 
 
 def _bqstorage_stream_to_parquet(query_job, parquet_path, progress_cb, start_pct, end_pct):
     """Stream via google-cloud-bigquery-storage (Arrow over gRPC) into parquet
-    without holding the full result in memory. Returns rows written."""
+    without holding the full result in memory. Returns rows written.
+
+    Falls back to plain REST arrow iterable when the caller doesn't have
+    `bigquery.readsessions.create` (403 PERMISSION_DENIED)."""
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -1280,6 +1317,14 @@ def _bqstorage_stream_to_parquet(query_job, parquet_path, progress_cb, start_pct
         batches = query_job.to_arrow_iterable(create_bqstorage_client=True)
     except TypeError:
         batches = query_job.result().to_arrow_iterable()
+    except Exception as e:
+        # readsessions permission denied → REST arrow stream (slower but works)
+        msg = str(e)
+        if "readsessions" in msg.lower() or "403" in msg or "PERMISSION_DENIED" in msg:
+            print(f"bqstorage unavailable ({msg.splitlines()[0][:120]}) — using REST arrow")
+            batches = query_job.result().to_arrow_iterable()
+        else:
+            raise
 
     writer = None
     rows_written = 0
