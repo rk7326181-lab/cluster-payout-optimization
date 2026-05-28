@@ -1559,16 +1559,30 @@ with st.sidebar:
                     # Clear AWB cache so it refreshes against new clusters
                     st.session_state.pop("_awb_cached_df", None)
                     st.session_state.pop("_awb_processed_id", None)
+
+                    # Capture summary BEFORE freeing the local DataFrame refs.
+                    _summary_n = len(cluster_df)
+                    _summary_hubs = cluster_df['hub_id'].nunique()
+
                     # Memory: drop local refs and force GC so the previous
                     # data generation is fully released before rerun.
                     del cluster_df, hub_df
                     import gc as _gc
                     _gc.collect()
 
-                    bq_progress(1.0, "✅ Complete — all data replaced with fresh records!")
+                    bq_progress(0.96, "📦 Persisting snapshot to git (if GH_TOKEN set)…")
+                    _ok, _info = DataLoader.persist_cache_to_git(
+                        message=f"auto: BQ cluster fetch {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} [skip ci]"
+                    )
+                    if _ok and 'pushed' in _info:
+                        bq_progress(1.0, "✅ Complete — pushed snapshot to repo (survives reboots)")
+                    else:
+                        bq_progress(1.0, "✅ Complete — fetched & loaded (set GH_TOKEN to persist across reboots)")
+                    print(f"persist_cache_to_git: {_info}")
+
                     status_detail.empty()
                     time.sleep(0.3)
-                    st.success(f"Fetched & replaced: **{len(cluster_df):,}** clusters from **{cluster_df['hub_id'].nunique():,}** hubs")
+                    st.success(f"Fetched & replaced: **{_summary_n:,}** clusters from **{_summary_hubs:,}** hubs")
                     st.rerun()
                 except Exception as e:
                     progress.empty()
@@ -1618,9 +1632,13 @@ with st.sidebar:
                 st.session_state["_awb_cached_df"] = _bq_df
                 st.session_state["_awb_processed_id"] = f"bq_{len(_bq_df)}"
                 _invalidate_pip_cache()
+                # Invalidate Maps Studio hex / hub-pincode caches so the new
+                # parquet + hexbin_cache.json are reloaded on next render.
+                st.session_state.pop("_ms_hex_cache", None)
+                st.session_state.pop("_hub_pin_counts_cache", None)
                 _sb_awb_prog.empty()
                 _sb_awb_status.empty()
-                st.success(f"Fetched {len(_bq_df):,} AWB records")
+                st.success(f"Fetched {len(_bq_df):,} AWB records. Hexagons will appear in Maps Studio.")
                 st.rerun()
 
     # AWB CSV upload in sidebar
@@ -2647,9 +2665,14 @@ with tab4:
                             st.session_state["_awb_cached_df"] = df
                             st.session_state["_awb_processed_id"] = f"bq_{len(df)}"
                             _invalidate_pip_cache()
+                            # Invalidate Maps Studio hex cache so the freshly
+                            # written hexbin_cache.json is picked up on next
+                            # render of Tab 5.
+                            st.session_state.pop("_ms_hex_cache", None)
+                            st.session_state.pop("_hub_pin_counts_cache", None)
                             progress.empty()
                             status.empty()
-                            st.success(f"✅ Replaced AWB data: **{len(df):,}** records for **{_pin_count_label:,}** pincodes")
+                            st.success(f"✅ Replaced AWB data: **{len(df):,}** records for **{_pin_count_label:,}** pincodes. Hexagons will appear in Maps Studio.")
                             st.rerun()
 
             with awb_col2:

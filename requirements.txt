@@ -10,9 +10,11 @@ geopandas>=0.13.0
 
 # Google Cloud (for BigQuery)
 google-cloud-bigquery>=3.10.0
+google-cloud-bigquery-storage>=2.20.0
 google-auth-oauthlib>=1.0.0
 google-auth>=2.22.0
 db-dtypes>=1.1.0
+pyarrow>=14.0.0
 
 # Gmail API (for fetching serviceability email attachments)
 google-api-python-client>=2.100.0

@@ -1178,45 +1178,43 @@ def _stream_to_parquet(query_job, parquet_path, progress_cb=None, start_pct=0.72
     Stream BigQuery results page-by-page directly to a parquet file.
     Never loads the full result into memory — safe for 11M+ row results on 1GB RAM.
     Returns total rows written.
+
+    Uses query_job.result(page_size=…).pages (the public, supported API).
+    The previous implementation used query_job._client.list_rows(destination)
+    which silently failed when destination was None (common for OAuth-auth
+    queries) and then fell back to to_dataframe() — which OOMs on Streamlit
+    Cloud's 1 GB instances.
     """
     try:
         import pyarrow as pa
         import pyarrow.parquet as pq
     except ImportError:
-        # pyarrow not available — fall back to in-memory download
         if progress_cb:
-            progress_cb(start_pct + 0.02, "⬇️ Downloading (no pyarrow, loading into memory)...")
-        df = query_job.to_dataframe()
+            progress_cb(start_pct + 0.02, "⬇️ Downloading via bqstorage (no pyarrow)…")
+        df = _safe_to_dataframe(query_job)
         df.to_parquet(parquet_path, index=False)
         if progress_cb:
             progress_cb(end_pct, f"⬇️ Downloaded {len(df):,} rows")
         return len(df)
 
     os.makedirs(os.path.dirname(parquet_path), exist_ok=True)
-    PAGE_SIZE = 25_000
-
-    # Try to get total row count for progress display
-    total_rows_est = None
-    try:
-        dest = query_job.destination
-        if dest:
-            _tbl = query_job._client.get_table(dest)
-            total_rows_est = _tbl.num_rows
-    except Exception:
-        pass
-
-    if total_rows_est and progress_cb:
-        progress_cb(start_pct, f"⬇️ Streaming {total_rows_est:,} rows to parquet...")
+    PAGE_SIZE = 50_000
 
     writer = None
     rows_written = 0
+    total_rows_est = None
+
     try:
-        rows_iter = query_job._client.list_rows(query_job.destination, page_size=PAGE_SIZE)
+        # Public iterator — works regardless of destination/permissions.
+        rows_iter = query_job.result(page_size=PAGE_SIZE)
+        total_rows_est = getattr(rows_iter, "total_rows", None)
+        if total_rows_est and progress_cb:
+            progress_cb(start_pct, f"⬇️ Streaming {total_rows_est:,} rows to parquet…")
+
         for page in rows_iter.pages:
             page_df = page.to_dataframe()
             if page_df.empty:
                 continue
-            # Normalize pincode in-flight so parquet stores clean strings
             if "pincode" in page_df.columns:
                 page_df["pincode"] = page_df["pincode"].apply(_norm_pincode)
             tbl = pa.Table.from_pandas(page_df, preserve_index=False)
@@ -1224,40 +1222,88 @@ def _stream_to_parquet(query_job, parquet_path, progress_cb=None, start_pct=0.72
                 writer = pq.ParquetWriter(parquet_path, tbl.schema)
             writer.write_table(tbl)
             rows_written += len(page_df)
+            # Drop the page frame ASAP so each page is GC'd before the next.
+            del page_df, tbl
             if progress_cb:
                 if total_rows_est:
                     pct = start_pct + (end_pct - start_pct) * min(rows_written / total_rows_est, 1.0)
                     progress_cb(pct, f"⬇️ {rows_written:,} / {total_rows_est:,} rows ({rows_written * 100 // total_rows_est}%)")
                 else:
-                    progress_cb(min(start_pct + 0.1, end_pct - 0.05), f"⬇️ {rows_written:,} rows written...")
+                    progress_cb(min(start_pct + 0.1, end_pct - 0.05), f"⬇️ {rows_written:,} rows written…")
     except Exception as e:
-        # Fallback: in-memory download if streaming fails
-        print(f"Streaming fallback triggered: {e}")
+        # If page-streaming somehow fails, try the BigQuery Storage Read API.
+        # That is also a streaming protocol (Arrow chunks over gRPC), NOT a
+        # full in-memory load — safe on 1 GB instances.
+        print(f"Page streaming failed → trying BQ Storage Read API: {e}")
         if writer:
-            try:
-                writer.close()
-            except Exception:
-                pass
+            try: writer.close()
+            except Exception: pass
             writer = None
         if progress_cb:
-            progress_cb(start_pct + 0.02, "⬇️ Streaming failed, loading into memory (fallback)...")
+            progress_cb(start_pct + 0.02, "⬇️ Switching to BQ Storage Read API (streaming)…")
         try:
-            df = query_job.to_dataframe()
-            if "pincode" in df.columns:
-                df["pincode"] = df["pincode"].apply(_norm_pincode)
-            df.to_parquet(parquet_path, index=False, engine="pyarrow")
-            rows_written = len(df)
+            rows_written = _bqstorage_stream_to_parquet(
+                query_job, parquet_path, progress_cb, start_pct + 0.05, end_pct
+            )
         except Exception as e2:
-            raise Exception(f"Both streaming and fallback download failed: {e2}")
+            raise Exception(f"Both page-stream and BQ-storage stream failed: {e2}")
     finally:
         if writer:
-            try:
-                writer.close()
-            except Exception:
-                pass
+            try: writer.close()
+            except Exception: pass
 
     if progress_cb:
         progress_cb(end_pct, f"✅ {rows_written:,} rows saved to parquet")
+    return rows_written
+
+
+def _safe_to_dataframe(query_job):
+    """to_dataframe(create_bqstorage_client=True) when bqstorage is installed,
+    else regular to_dataframe(). Used only as a last resort."""
+    try:
+        return query_job.to_dataframe(create_bqstorage_client=True)
+    except TypeError:
+        # Older google-cloud-bigquery without the kwarg
+        return query_job.to_dataframe()
+    except Exception:
+        return query_job.to_dataframe()
+
+
+def _bqstorage_stream_to_parquet(query_job, parquet_path, progress_cb, start_pct, end_pct):
+    """Stream via google-cloud-bigquery-storage (Arrow over gRPC) into parquet
+    without holding the full result in memory. Returns rows written."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    # to_arrow_iterable returns an iterator of pyarrow.RecordBatch
+    try:
+        batches = query_job.to_arrow_iterable(create_bqstorage_client=True)
+    except TypeError:
+        batches = query_job.result().to_arrow_iterable()
+
+    writer = None
+    rows_written = 0
+    try:
+        for batch in batches:
+            if batch.num_rows == 0:
+                continue
+            # Normalise pincode column at the Arrow layer (cheap, no pandas)
+            tbl = pa.Table.from_batches([batch])
+            if writer is None:
+                writer = pq.ParquetWriter(parquet_path, tbl.schema)
+            writer.write_table(tbl)
+            rows_written += batch.num_rows
+            if progress_cb:
+                progress_cb(min(start_pct + 0.2, end_pct - 0.02),
+                            f"⬇️ {rows_written:,} rows streamed (bqstorage)…")
+            del batch, tbl
+    finally:
+        if writer:
+            try: writer.close()
+            except Exception: pass
+
+    if progress_cb:
+        progress_cb(end_pct, f"✅ {rows_written:,} rows saved (bqstorage stream)")
     return rows_written
 
 

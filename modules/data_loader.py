@@ -38,6 +38,100 @@ class DataLoader:
     def _manifest_path(self):
         return self.project_root / self.CACHE_MANIFEST
 
+    @staticmethod
+    def persist_cache_to_git(message=None):
+        """Auto-commit + push the data/ snapshot so the next Streamlit Cloud
+        container restart sees the freshly-fetched data instead of the
+        repo-baseline (which can be weeks old).
+
+        Activates only when both:
+          - GH_TOKEN is present in env (set via Streamlit secrets), AND
+          - the working directory is a git repo with `origin` remote.
+
+        Safe no-op otherwise; never crashes the caller.
+        Returns (ok: bool, info: str).
+        """
+        import os, subprocess, shlex, time
+        try:
+            import streamlit as st
+            token = (
+                os.environ.get("GH_TOKEN")
+                or (st.secrets.get("GH_TOKEN") if hasattr(st, "secrets") else None)
+            )
+        except Exception:
+            token = os.environ.get("GH_TOKEN")
+        if not token:
+            return False, "GH_TOKEN not set — skipping git persistence"
+
+        repo_root = Path(__file__).parent.parent
+        if not (repo_root / ".git").exists():
+            return False, "Not a git repo — skipping git persistence"
+
+        def run(args, check=True):
+            r = subprocess.run(
+                args, cwd=str(repo_root),
+                capture_output=True, text=True, timeout=120,
+            )
+            if check and r.returncode != 0:
+                raise RuntimeError(f"{' '.join(args)} failed: {r.stderr.strip()}")
+            return r
+
+        try:
+            # Identity (bot-style) so Streamlit Cloud commits don't claim a person.
+            run(["git", "config", "user.email", "streamlit-bot@app.local"], check=False)
+            run(["git", "config", "user.name",  "streamlit-app-cache-bot"], check=False)
+
+            # ── Cleanup: every fresh fetch REPLACES the previous snapshot.
+            # Identify the newest file in each family and remove the older ones
+            # so the repo only ever carries one cluster/hub/kepler trio.
+            data_dir = repo_root / "data"
+            for fam_glob in ("clustering_live_*.csv",
+                             "hub_Lat_Long*.csv",
+                             "kepler_gl_final_main_*_csv.csv"):
+                files = sorted(data_dir.glob(fam_glob), key=lambda p: p.stat().st_mtime)
+                if len(files) > 1:
+                    # Keep the newest, remove all older ones via git rm.
+                    for old in files[:-1]:
+                        rel = old.relative_to(repo_root).as_posix()
+                        run(["git", "rm", "-f", "--ignore-unmatch", "--", rel], check=False)
+
+            # Stage only the allow-listed cache files.
+            patterns = [
+                "data/cache_manifest.json",
+                "data/clustering_live_*.csv",
+                "data/hub_Lat_Long*.csv",
+                "data/kepler_gl_final_main_*_csv.csv",
+                "data/live_clusters_cache.json",
+            ]
+            for pat in patterns:
+                # Use shell glob via git's pathspec
+                run(["git", "add", "--", pat], check=False)
+
+            # Anything to commit?
+            status = run(["git", "status", "--porcelain"], check=False)
+            if not status.stdout.strip():
+                return True, "no cache changes to push"
+
+            msg = message or f"auto: refresh cached fetch at {time.strftime('%Y-%m-%d %H:%M:%S')} [skip ci]"
+            run(["git", "commit", "-m", msg, "--no-verify"], check=True)
+
+            # Determine current branch.
+            br = run(["git", "rev-parse", "--abbrev-ref", "HEAD"], check=True).stdout.strip() or "main"
+
+            # Compose authenticated push URL from existing origin.
+            remote = run(["git", "config", "--get", "remote.origin.url"], check=True).stdout.strip()
+            if remote.startswith("https://"):
+                # https://github.com/owner/repo.git → https://<token>@github.com/owner/repo.git
+                authed = remote.replace("https://", f"https://{token}@", 1)
+            else:
+                # ssh: prefer to bail rather than mangle the URL
+                return False, f"origin is not https ({remote}) — set GH_TOKEN + https remote"
+
+            run(["git", "push", authed, f"HEAD:{br}"], check=True)
+            return True, f"pushed cache snapshot to origin/{br}"
+        except Exception as e:
+            return False, f"git persistence failed: {e}"
+
     def _to_rel(self, p):
         """Convert any path to one relative to project_root (POSIX) so the
         manifest survives moving between machines (Windows ↔ Streamlit Cloud).
