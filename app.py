@@ -3487,6 +3487,18 @@ with tab5:
         except Exception as e:
             st.caption(f"Could not prepare map data: {e}")
 
+    # Warn when cluster count exceeds the Maps Studio inline-JSON cap (5 000 polygons).
+    # Loading 12k+ polygons into a single HTML page causes MemoryError.
+    # Users can filter by hub or category in the sidebar to see all clusters.
+    _ms_feature_count = len(((_ms_cluster_geojson or {}).get("features")) or [])
+    if _ms_feature_count > 5_000:
+        st.warning(
+            f"⚠ **{_ms_feature_count:,} clusters** — Maps Studio displays the first **5,000** "
+            f"to avoid memory issues. Use the **sidebar filters** (hub or category) to narrow "
+            f"the view and see a specific hub's polygons in full.",
+            icon="⚠️",
+        )
+
     maps_html = get_free_maps_html(_ms_cluster_geojson, _ms_hub_list, _ms_awb_data, _ms_hexbin_data)
 
     # Full-height map studio — hide Streamlit chrome for immersive view

@@ -41,6 +41,18 @@ def get_free_maps_html(cluster_geojson=None, hub_list=None, awb_data=None, hexbi
         or (hexbin_data and len(hexbin_data) > 0)
     )
     if has_data:
+        # Cap features to avoid MemoryError on huge cluster datasets.
+        # 5 000 polygons ≈ 3–5 MB of inline JSON — safe on all environments.
+        # Users can filter by hub/category in the sidebar to see all clusters.
+        MAX_FEATURES = 5_000
+        features = (cluster_geojson or {}).get("features", [])
+        _truncated = 0
+        if len(features) > MAX_FEATURES:
+            _truncated = len(features) - MAX_FEATURES
+            cluster_geojson = {"type": "FeatureCollection",
+                                "features": features[:MAX_FEATURES],
+                                "__truncated__": _truncated}
+
         data_script = "\n<script>\n"
         data_script += "window.__CLUSTER_GEOJSON__ = %s;\n" % json.dumps(
             cluster_geojson or {"type": "FeatureCollection", "features": []},
@@ -55,6 +67,10 @@ def get_free_maps_html(cluster_geojson=None, hub_list=None, awb_data=None, hexbi
         data_script += "window.__HEXBIN_DATA__ = %s;\n" % json.dumps(
             hexbin_data or [], separators=(",", ":")
         )
+        if _truncated:
+            data_script += (
+                "window.__CLUSTER_TRUNCATED__ = %d;\n" % _truncated
+            )
         data_script += "</script>\n"
         # Insert data script BEFORE the main <script> block so globals are
         # available when the maps_studio JS runs.
