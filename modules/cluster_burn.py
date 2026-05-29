@@ -62,7 +62,7 @@ class ClusterBurnCalculator:
             SELECT id, name
             FROM `{DATA_PROJECT}.ecommerce.ecommerce_hub`
             ORDER BY name
-        """).to_dataframe()
+        """).to_dataframe(create_bqstorage_client=False)
 
     # ── AWB query ─────────────────────────────────────────────────────────────
     @staticmethod
@@ -128,7 +128,7 @@ class ClusterBurnCalculator:
         LEFT JOIN `{DATA_PROJECT}.ecommerce.ecommerce_hub` eh ON ad.hub_id = eh.id
         """
         try:
-            df = client.query(query).to_dataframe()
+            df = client.query(query).to_dataframe(create_bqstorage_client=False)
             return df, None
         except Exception as exc:
             return pd.DataFrame(), str(exc)
