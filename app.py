@@ -1750,10 +1750,12 @@ with st.sidebar:
                 st.session_state["_awb_cached_df"] = _bq_df
                 st.session_state["_awb_processed_id"] = f"bq_{len(_bq_df)}"
                 _invalidate_pip_cache()
-                # Invalidate Maps Studio hex / hub-pincode caches so the new
-                # parquet + hexbin_cache.json are reloaded on next render.
-                st.session_state.pop("_ms_hex_cache", None)
-                st.session_state.pop("_hub_pin_counts_cache", None)
+                # Clear ALL Maps Studio and hexbin caches so the new AWB data
+                # (parquet + hexbin_cache.json) is picked up on the very next
+                # Maps Studio render — including the rebuild-attempted guard.
+                for _k in ("_ms_hex_cache", "_hub_pin_counts_cache",
+                           "_hex_rebuild_attempted", "_ms_payload"):
+                    st.session_state.pop(_k, None)
                 _sb_awb_prog.empty()
                 _sb_awb_status.empty()
                 st.success(f"Fetched {len(_bq_df):,} AWB records. Hexagons will appear in Maps Studio.")
@@ -1777,6 +1779,9 @@ with st.sidebar:
                     st.session_state["_awb_cached_df"] = _sb_awb_df
                     st.session_state["_awb_processed_id"] = _sb_awb_id
                     _invalidate_pip_cache()
+                    for _k in ("_ms_hex_cache", "_hub_pin_counts_cache",
+                               "_hex_rebuild_attempted", "_ms_payload"):
+                        st.session_state.pop(_k, None)
                     st.success(f"{len(_sb_awb_df):,} AWB records saved")
                     st.rerun()
             except Exception as e:
@@ -3488,17 +3493,7 @@ with tab5:
             st.caption(f"Could not prepare map data: {e}")
 
     # Warn when cluster count exceeds the Maps Studio inline-JSON cap (5 000 polygons).
-    # Loading 12k+ polygons into a single HTML page causes MemoryError.
-    # Users can filter by hub or category in the sidebar to see all clusters.
     _ms_feature_count = len(((_ms_cluster_geojson or {}).get("features")) or [])
-    if _ms_feature_count > 5_000:
-        st.warning(
-            f"⚠ **{_ms_feature_count:,} clusters** — Maps Studio displays the first **5,000** "
-            f"to avoid memory issues. Use the **sidebar filters** (hub or category) to narrow "
-            f"the view and see a specific hub's polygons in full.",
-            icon="⚠️",
-        )
-
     maps_html = get_free_maps_html(_ms_cluster_geojson, _ms_hub_list, _ms_awb_data, _ms_hexbin_data)
 
     # Full-height map studio — hide Streamlit chrome for immersive view

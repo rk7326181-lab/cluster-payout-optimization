@@ -41,23 +41,34 @@ def get_free_maps_html(cluster_geojson=None, hub_list=None, awb_data=None, hexbi
         or (hexbin_data and len(hexbin_data) > 0)
     )
     if has_data:
-        # Cap features to avoid MemoryError on huge cluster datasets.
-        # 5 000 polygons ≈ 3–5 MB of inline JSON — safe on all environments.
-        # Users can filter by hub/category in the sidebar to see all clusters.
-        MAX_FEATURES = 5_000
         features = (cluster_geojson or {}).get("features", [])
         _truncated = 0
-        if len(features) > MAX_FEATURES:
-            _truncated = len(features) - MAX_FEATURES
-            cluster_geojson = {"type": "FeatureCollection",
-                                "features": features[:MAX_FEATURES],
-                                "__truncated__": _truncated}
+
+        # Try serialising ALL features first (works fine on production servers).
+        # Only fall back to the 5 000-feature hard cap if we actually hit a
+        # MemoryError — this avoids hiding clusters on machines with enough RAM
+        # while still protecting constrained / 1 GB environments.
+        try:
+            _geojson_str = json.dumps(
+                cluster_geojson or {"type": "FeatureCollection", "features": []},
+                separators=(",", ":"),
+            )
+        except MemoryError:
+            MAX_FEATURES = 5_000
+            if len(features) > MAX_FEATURES:
+                _truncated = len(features) - MAX_FEATURES
+                cluster_geojson = {
+                    "type": "FeatureCollection",
+                    "features": features[:MAX_FEATURES],
+                    "__truncated__": _truncated,
+                }
+            _geojson_str = json.dumps(
+                cluster_geojson or {"type": "FeatureCollection", "features": []},
+                separators=(",", ":"),
+            )
 
         data_script = "\n<script>\n"
-        data_script += "window.__CLUSTER_GEOJSON__ = %s;\n" % json.dumps(
-            cluster_geojson or {"type": "FeatureCollection", "features": []},
-            separators=(",", ":"),
-        )
+        data_script += "window.__CLUSTER_GEOJSON__ = %s;\n" % _geojson_str
         data_script += "window.__HUB_DATA__ = %s;\n" % json.dumps(
             hub_list or [], separators=(",", ":")
         )
