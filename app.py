@@ -1086,6 +1086,66 @@ def _process_and_store(cluster_df, hub_df, kepler_path=None, excel_path=None):
     _gc.collect()
 
 
+def _apply_edited_polygons(uploaded_csv) -> str:
+    """Read a Maps Studio edited-polygons CSV and update processed_data in place.
+
+    Expected columns (from Maps Studio CSV export):
+        cluster_code, hub_name, geometry_wkt   (others optional)
+
+    Returns a status message string.
+    """
+    try:
+        import io
+        from shapely.wkt import loads as _load_wkt
+        from shapely.wkt import dumps as _wkt_dumps
+
+        df = pd.read_csv(io.BytesIO(uploaded_csv.getbuffer()))
+        df.columns = df.columns.str.strip()
+
+        if "geometry_wkt" not in df.columns or "cluster_code" not in df.columns:
+            return "CSV must have 'cluster_code' and 'geometry_wkt' columns."
+
+        proc = st.session_state.get("processed_data")
+        if proc is None:
+            return "No cluster data loaded. Load data first."
+
+        updated = 0
+        errors = []
+        for _, row in df.iterrows():
+            cc = str(row["cluster_code"]).strip()
+            wkt = str(row["geometry_wkt"]).strip()
+            if not wkt or wkt.lower() in ("", "nan"):
+                continue
+            mask = proc["cluster_code"].astype(str) == cc
+            if not mask.any():
+                continue
+            try:
+                new_geom = _load_wkt(wkt)
+                proc.loc[mask, "geometry"] = new_geom
+                proc.loc[mask, "boundary"] = _wkt_dumps(new_geom)
+                updated += mask.sum()
+            except Exception as e:
+                errors.append(f"{cc}: {e}")
+
+        st.session_state["processed_data"] = proc
+        st.session_state["cluster_data"] = proc
+
+        # Clear all caches that depend on polygon geometry so they rebuild fresh
+        for _k in ("_pip_awb_stats", "_pip_data_id", "_hub_pin_counts_cache",
+                   "_ms_payload", "_ms_hex_cache", "_hex_rebuild_attempted",
+                   "_poly_opt_summary", "_poly_opt_suggestions",
+                   "_poly_opt_before_after", "_poly_opt_warnings",
+                   "_hub_burn_analysis", "_poly_boundary_suggestions"):
+            st.session_state.pop(_k, None)
+
+        msg = f"✅ Applied edits to {updated} polygon row(s) across {df['cluster_code'].nunique()} cluster(s)."
+        if errors:
+            msg += f" Skipped {len(errors)} error(s): {'; '.join(errors[:3])}"
+        return msg
+    except Exception as e:
+        return f"Error applying edits: {e}"
+
+
 def get_logo_base64():
     logo_path = APP_ROOT / "brand_assets" / "logo.jpeg"
     if logo_path.exists():
@@ -1741,6 +1801,27 @@ with st.sidebar:
         st.session_state["_cpo_analytics_attempted"] = True
         st.rerun()
 
+    # ── Apply Edited Polygons (from Maps Studio CSV export) ──
+    st.markdown("---")
+    st.markdown("**Apply Maps Studio Edits**")
+    st.caption(
+        "After editing polygon boundaries in Maps Studio, click **CSV** in the "
+        "'Export Edited Polygons' panel, then upload the file here to update all tabs."
+    )
+    _edited_poly_file = st.file_uploader(
+        "Upload edited polygons CSV",
+        type=["csv"], key="edited_polygons_upload",
+        label_visibility="collapsed",
+    )
+    if _edited_poly_file and st.session_state.get("_edited_poly_id") != _edited_poly_file.file_id:
+        _msg = _apply_edited_polygons(_edited_poly_file)
+        st.session_state["_edited_poly_id"] = _edited_poly_file.file_id
+        if _msg.startswith("✅"):
+            st.success(_msg)
+            st.rerun()
+        else:
+            st.error(_msg)
+
     # ── Run Optimizer button (stitch: bottom of sidebar) ──
     st.markdown("---")
     st.markdown("""
@@ -2064,13 +2145,14 @@ with tab2:
         st.markdown("<div style='height:24px'></div>", unsafe_allow_html=True)
 
         # ── Sub-tabs for detailed views ──
-        cpo_tab1, cpo_tab2, cpo_tab3, cpo_tab4, cpo_tab5, cpo_tab6 = st.tabs([
+        cpo_tab1, cpo_tab2, cpo_tab3, cpo_tab4, cpo_tab5, cpo_tab6, cpo_tab7 = st.tabs([
             "High Cluster Payout Hubs",
             "High Cluster CPO Hubs",
             "High Burn Hubs",
             "Optimization Candidates",
             "Recommendations",
             "Polygon Optimizer",
+            "🔥 Hub Burn Dashboard",
         ])
 
         with cpo_tab1:
@@ -2422,8 +2504,167 @@ with tab2:
                             _dl_df.to_csv(index=False), "spatial_polygon_optimization_report.csv",
                             "text/csv", use_container_width=True
                         )
+
+                    # ── Boundary Expansion Suggestions ──────────────────────
+                    st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+                    st.markdown("#### Boundary Expansion Suggestions")
+                    st.caption(
+                        "Instead of changing rates, expand lower-rate polygon boundaries by 0.30–0.50 km "
+                        "to capture AWBs currently paying higher rates. Safer than rate cuts."
+                    )
+                    if st.button("Analyse Boundary Expansions", key="run_boundary_exp",
+                                 use_container_width=True):
+                        with st.spinner("Querying AWB distances via DuckDB — this uses the parquet cache…"):
+                            _bnd_sugg = _tab_optimizer.suggest_boundary_expansions()
+                        st.session_state["_poly_boundary_suggestions"] = _bnd_sugg
+
+                    _bnd_sugg = st.session_state.get("_poly_boundary_suggestions")
+                    if _bnd_sugg is not None:
+                        if _bnd_sugg.empty:
+                            st.info("No boundary expansion opportunities found "
+                                    "(AWB data may not be loaded or no capturable AWBs near ring boundaries).")
+                        else:
+                            _bnd_total = _bnd_sugg["monthly_saving"].sum()
+                            _bnd_annual = _bnd_sugg["annual_saving"].sum()
+                            bb1, bb2, bb3 = st.columns(3)
+                            bb1.metric("Expansion Opportunities", f"{len(_bnd_sugg)}")
+                            bb2.metric("Total Monthly Saving", f"₹{_bnd_total:,.0f}")
+                            bb3.metric("Total Annual Saving", f"₹{_bnd_annual:,.0f}")
+                            st.dataframe(
+                                _bnd_sugg[[
+                                    "hub_name", "cluster_code", "boundary_km",
+                                    "current_radius_km", "suggested_radius_km",
+                                    "expansion_km", "inner_rate", "outer_rate",
+                                    "awbs_capturable", "monthly_saving", "annual_saving",
+                                ]],
+                                use_container_width=True, hide_index=True,
+                                column_config={
+                                    "hub_name":            st.column_config.TextColumn("Hub"),
+                                    "cluster_code":        st.column_config.TextColumn("Cluster"),
+                                    "boundary_km":         st.column_config.NumberColumn("Boundary km", format="%.0f km"),
+                                    "current_radius_km":   st.column_config.NumberColumn("Current km", format="%.2f"),
+                                    "suggested_radius_km": st.column_config.NumberColumn("Suggested km", format="%.2f"),
+                                    "expansion_km":        st.column_config.NumberColumn("Expand by", format="+%.2f km"),
+                                    "inner_rate":          st.column_config.NumberColumn("Inner ₹", format="₹%.1f"),
+                                    "outer_rate":          st.column_config.NumberColumn("Outer ₹", format="₹%.1f"),
+                                    "awbs_capturable":     st.column_config.NumberColumn("AWBs Captured"),
+                                    "monthly_saving":      st.column_config.NumberColumn("Monthly Saving", format="₹%.0f"),
+                                    "annual_saving":       st.column_config.NumberColumn("Annual Saving", format="₹%.0f"),
+                                },
+                            )
+                            st.download_button(
+                                "Download Boundary Expansion Report",
+                                _bnd_sugg.to_csv(index=False),
+                                "boundary_expansion_suggestions.csv",
+                                "text/csv", use_container_width=True,
+                            )
             else:
                 st.info("Load cluster data first to run polygon analysis.")
+
+        with cpo_tab7:
+            st.markdown("""
+            <div style="margin-bottom:12px;">
+                <p style="font-size:0.85rem; color:var(--sfx-text-muted); margin:0;">
+                    Per-hub cost and burn breakdown — total AWBs, monthly cost, SOP-aligned cost,
+                    monthly burn, CPO vs SOP CPO. Runs the spatial polygon analysis internally.
+                </p>
+            </div>
+            """, unsafe_allow_html=True)
+
+            _hbd_data = st.session_state.get("processed_data")
+            _hbd_hub  = st.session_state.get("hub_data")
+
+            if _hbd_data is not None and len(_hbd_data) > 0:
+                # Reuse cached hub analysis from tab6 if already computed, else compute fresh
+                _hbd_analysis = st.session_state.get("_hub_burn_analysis")
+                _hbd_parquet = _get_awb_cache_path().replace(".csv", ".parquet")
+
+                if st.button("Load / Refresh Hub Burn Dashboard", key="run_hub_burn",
+                             use_container_width=True, type="primary"):
+                    with st.spinner("Running spatial analysis to compute hub-level costs…"):
+                        _hbd_opt = PolygonOptimizer(
+                            cluster_df=_hbd_data, hub_df=_hbd_hub,
+                            cpo_analytics=cpo_a,
+                            awb_counts=st.session_state.get("_hub_pin_counts_cache", {}),
+                            awb_parquet_path=_hbd_parquet,
+                        )
+                        _hbd_analysis = _hbd_opt.analyze_hub_polygons()
+                    st.session_state["_hub_burn_analysis"] = _hbd_analysis
+
+                if _hbd_analysis is not None and not _hbd_analysis.empty:
+                    # ── Summary metrics ──
+                    _hbd_total_burn = _hbd_analysis["total_burn"].sum()
+                    _hbd_total_cost = _hbd_analysis["total_cost"].sum()
+                    _hbd_total_awb  = _hbd_analysis["total_awb"].sum()
+                    _hbd_hubs_burning = (_hbd_analysis["total_burn"] > 0).sum()
+
+                    hc1, hc2, hc3, hc4 = st.columns(4)
+                    hc1.metric("Hubs Analysed", f"{len(_hbd_analysis)}")
+                    hc2.metric("Hubs with Burn", f"{_hbd_hubs_burning}")
+                    hc3.metric("Total Monthly Cost", f"₹{_hbd_total_cost:,.0f}")
+                    hc4.metric("Total Monthly Burn", f"₹{_hbd_total_burn:,.0f}")
+
+                    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+                    # ── Bar chart: top 15 hubs by burn ──
+                    try:
+                        import plotly.express as px
+                        _chart_df = (
+                            _hbd_analysis[_hbd_analysis["total_burn"] > 0]
+                            .sort_values("total_burn", ascending=False)
+                            .head(15)
+                        )
+                        if not _chart_df.empty:
+                            _fig = px.bar(
+                                _chart_df, x="hub_name", y="total_burn",
+                                color="total_burn",
+                                color_continuous_scale="Reds",
+                                labels={"hub_name": "Hub", "total_burn": "Monthly Burn (₹)"},
+                                title="Top 15 Hubs by Monthly Burn",
+                            )
+                            _fig.update_layout(
+                                height=340, margin=dict(l=10, r=10, t=40, b=10),
+                                xaxis_tickangle=-30, showlegend=False,
+                                coloraxis_showscale=False,
+                            )
+                            st.plotly_chart(_fig, use_container_width=True)
+                    except ImportError:
+                        pass
+
+                    # ── Full hub-level table ──
+                    st.markdown("**All Hubs — Cost & Burn Breakdown**")
+                    _display_cols = [
+                        "hub_name", "polygon_count", "total_awb", "total_cost",
+                        "sop_cost", "total_burn", "current_cpo", "sop_cpo",
+                        "sop_compliant_pct", "overcharged_count",
+                    ]
+                    _display_cols = [c for c in _display_cols if c in _hbd_analysis.columns]
+                    st.dataframe(
+                        _hbd_analysis[_display_cols].sort_values("total_burn", ascending=False),
+                        use_container_width=True, hide_index=True,
+                        column_config={
+                            "hub_name":          st.column_config.TextColumn("Hub"),
+                            "polygon_count":     st.column_config.NumberColumn("Polygons"),
+                            "total_awb":         st.column_config.NumberColumn("Total AWBs"),
+                            "total_cost":        st.column_config.NumberColumn("Monthly Cost", format="₹%.0f"),
+                            "sop_cost":          st.column_config.NumberColumn("SOP Cost", format="₹%.0f"),
+                            "total_burn":        st.column_config.NumberColumn("Monthly Burn", format="₹%.0f"),
+                            "current_cpo":       st.column_config.NumberColumn("CPO", format="₹%.2f"),
+                            "sop_cpo":           st.column_config.NumberColumn("SOP CPO", format="₹%.2f"),
+                            "sop_compliant_pct": st.column_config.NumberColumn("SOP Compliant %", format="%.0f%%"),
+                            "overcharged_count": st.column_config.NumberColumn("Overcharged Polygons"),
+                        },
+                    )
+                    st.download_button(
+                        "Download Hub Burn Dashboard",
+                        _hbd_analysis[_display_cols].to_csv(index=False),
+                        "hub_burn_dashboard.csv", "text/csv",
+                        use_container_width=True,
+                    )
+                else:
+                    st.info("Click **Load / Refresh Hub Burn Dashboard** above to run the spatial analysis.")
+            else:
+                st.info("Load cluster data first (Step 1 or sidebar).")
 
     else:
         st.markdown("""
@@ -3180,17 +3421,21 @@ with tab5:
                         "awb_sample": _ms_awb_data,
                     }
 
-            # ── Auto-build hexbin cache from in-memory AWB if disk cache empty ──
-            # On Streamlit Cloud, the data/awb_cache/*.json files don't survive
-            # container reboots. If we still have the AWB DataFrame in session
-            # state from this run, rebuild the hex cells on the fly.
-            if (not _ms_hexbin_data) and st.session_state.get("_awb_cached_df") is not None:
-                try:
-                    from modules.bigquery_client import _precompute_hexbin_cache
-                    _awb_in_mem = st.session_state["_awb_cached_df"]
-                    if len(_awb_in_mem) > 0:
-                        with st.spinner(f"Rebuilding hexbin overlay from {len(_awb_in_mem):,} AWB rows…"):
-                            _precompute_hexbin_cache(_awb_in_mem)
+            # ── Auto-build hexbin cache when disk cache is empty ──
+            # Priority 1: rebuild from AWB parquet (handles 11M+ rows via DuckDB,
+            #   works after container restarts even when _awb_cached_df is gone).
+            # Priority 2: rebuild from in-memory DataFrame (CSV-upload sessions).
+            # Guard: only rebuild once per session (not on every rerun) by checking
+            #   a session flag so we don't block the page every time Maps Studio loads.
+            if not _ms_hexbin_data and not st.session_state.get("_hex_rebuild_attempted"):
+                st.session_state["_hex_rebuild_attempted"] = True
+                _awb_parquet_hex = _get_awb_cache_path().replace(".csv", ".parquet")
+
+                if os.path.exists(_awb_parquet_hex):
+                    try:
+                        from modules.bigquery_client import _precompute_hexbin_from_parquet
+                        with st.spinner("Building AWB hexbin from parquet cache…"):
+                            _precompute_hexbin_from_parquet(_awb_parquet_hex)
                         _ms_hexbin_data = load_hexbin_cache()
                         _ms_awb_data = load_awb_sample_cache()
                         if _ms_hexbin_data:
@@ -3198,15 +3443,32 @@ with tab5:
                                 "hexbin": _ms_hexbin_data,
                                 "awb_sample": _ms_awb_data,
                             }
-                except Exception as _hex_err:
-                    st.caption(f"Hexbin auto-build skipped: {_hex_err}")
+                    except Exception as _hex_err:
+                        st.caption(f"Hexbin parquet-build skipped: {_hex_err}")
+
+                if not _ms_hexbin_data and st.session_state.get("_awb_cached_df") is not None:
+                    try:
+                        from modules.bigquery_client import _precompute_hexbin_cache
+                        _awb_in_mem = st.session_state["_awb_cached_df"]
+                        if len(_awb_in_mem) > 0:
+                            with st.spinner(f"Rebuilding hexbin from {len(_awb_in_mem):,} AWB rows…"):
+                                _precompute_hexbin_cache(_awb_in_mem)
+                            _ms_hexbin_data = load_hexbin_cache()
+                            _ms_awb_data = load_awb_sample_cache()
+                            if _ms_hexbin_data:
+                                st.session_state["_ms_hex_cache"] = {
+                                    "hexbin": _ms_hexbin_data,
+                                    "awb_sample": _ms_awb_data,
+                                }
+                    except Exception as _hex_err2:
+                        st.caption(f"Hexbin in-memory build skipped: {_hex_err2}")
 
             # ── Status banner so the user sees WHY hexagons may be hidden ──
             if not _ms_hexbin_data:
                 st.info(
                     "🔶 **AWB hexagons not available** — fetch AWB data from the "
-                    "**Data → AWB Data** tab. Once fetched, the hexagon overlay "
-                    "will appear here (toggle is auto-enabled when data exists).",
+                    "**Data → AWB Data** tab first. Once fetched, the hexagon overlay "
+                    "appears automatically on your next visit to Maps Studio.",
                     icon="ℹ️",
                 )
             else:

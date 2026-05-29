@@ -2177,6 +2177,10 @@ function saveHubEdit(){
         <button class="eb-btn" onclick="exportHubData('${_expHubId}','csv')" style="flex:1;min-width:90px;padding:7px 10px;font-size:11px;border-radius:6px;border:1px solid var(--border);background:var(--surface);color:var(--text);cursor:pointer;font-weight:600;display:flex;align-items:center;gap:5px;justify-content:center">\u{1F4CA} CSV</button>
       </div>
       <div style="font-size:9px;color:var(--muted);margin-top:6px;line-height:1.5">GeoJSON &amp; KML include full polygon geometry — importable in Google My Maps, Kepler.gl, QGIS, etc. CSV includes WKT geometry column.</div>
+      <div style="font-size:9px;color:#6fd9bc;margin-top:6px;line-height:1.5;font-weight:600">
+        &#x2139;&#xFE0F; To update all dashboards: download <b>CSV</b> above, then upload it in the
+        <b>sidebar → "Apply Maps Studio Edits"</b>. All tabs (Burn Calc, CPO Dashboard, Maps Studio) will refresh automatically.
+      </div>
     </div>`;
 
     // Also add "Export ALL Hubs" button

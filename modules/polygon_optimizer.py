@@ -492,13 +492,20 @@ class PolygonOptimizer:
             return self._do_fallback_awb_matching(metrics)
 
     def _do_spatial_awb_matching(self, metrics, awb_df) -> pd.DataFrame:
-        """Actual point-in-polygon AWB matching using Shapely.
+        """Vectorised point-in-polygon AWB matching using geopandas sjoin.
 
-        Optimized: processes AWBs hub-by-hub, uses numpy vectorization for
-        coordinate extraction, and prepared geometries for fast containment.
-        For large datasets (>1M AWBs), samples per hub for speed.
+        Processes AWBs hub-by-hub (memory-safe: each hub is a small GeoDataFrame).
+        Preserves smallest-polygon-first priority for overlapping polygons.
+        Falls back to the original Shapely loop if geopandas is unavailable.
+        For large datasets (>5M AWBs), samples 20% per hub and scales counts up.
         """
-        # Build hub → prepared polygons lookup
+        try:
+            import geopandas as gpd
+            _HAS_GPD = True
+        except ImportError:
+            _HAS_GPD = False
+
+        # Build hub → polygon list (sorted by area ascending = innermost first)
         hub_polygons = {}
         for _, row in metrics.iterrows():
             hn = row["hub_name"]
@@ -523,12 +530,10 @@ class PolygonOptimizer:
                 "compliance": row["compliance"],
                 "rate_gap": row["rate_gap"],
             })
-
-        # Sort each hub's polygons by area ascending (match smallest = innermost first)
         for hn in hub_polygons:
             hub_polygons[hn].sort(key=lambda p: p["area"])
 
-        # Determine if we need sampling (>5M AWBs = sample 20% per hub)
+        # Sampling for very large datasets
         total_awbs = len(awb_df)
         sample_frac = 1.0
         scale_factor = 1.0
@@ -536,24 +541,51 @@ class PolygonOptimizer:
             sample_frac = 0.2
             scale_factor = 1.0 / sample_frac
 
-        # Count AWBs per polygon
         polygon_awb_counts = {}
-
-        # Only process hubs that have polygons
         hubs_with_polygons = set(hub_polygons.keys())
         relevant_awbs = awb_df[awb_df["hub"].isin(hubs_with_polygons)]
 
         for hub_name, group in relevant_awbs.groupby("hub"):
             polys = hub_polygons[hub_name]
+            if not polys:
+                continue
 
-            # Sample if dataset is large
             if sample_frac < 1.0 and len(group) > 1000:
                 group = group.sample(frac=sample_frac, random_state=42)
 
-            # Extract coordinates as numpy arrays for speed
             lats = group["lat"].values
             lngs = group["lng"].values
 
+            if _HAS_GPD:
+                # ── Vectorised path (gpd.sjoin) ──────────────────────────────
+                # polys list is already area-ascending; building GDF in same order
+                # means index_right 0 = smallest polygon → kept first after dedup.
+                try:
+                    pts_gdf = gpd.GeoDataFrame(
+                        {"_i": np.arange(len(lats))},
+                        geometry=gpd.points_from_xy(lngs, lats),
+                        crs="EPSG:4326",
+                    )
+                    polys_gdf = gpd.GeoDataFrame(
+                        {"cc": [p["cluster_code"] for p in polys],
+                         "_area": [p["area"] for p in polys]},
+                        geometry=[p["geom"].buffer(0) if not p["geom"].is_valid else p["geom"]
+                                  for p in polys],
+                        crs="EPSG:4326",
+                    )
+                    joined = gpd.sjoin(pts_gdf, polys_gdf, how="left", predicate="within")
+                    # Sort so that for each point the smallest polygon comes first,
+                    # then drop duplicates — equivalent to the original break-on-first logic.
+                    joined = joined.sort_values(["_i", "index_right"])
+                    joined = joined.drop_duplicates(subset=["_i"])
+                    matched = joined[joined["cc"].notna()]
+                    for cc, cnt in matched.groupby("cc").size().items():
+                        polygon_awb_counts[str(cc)] = polygon_awb_counts.get(str(cc), 0) + int(cnt)
+                    continue  # skip fallback below
+                except Exception:
+                    pass  # fall through to Shapely loop
+
+            # ── Fallback: original Shapely prepared-geometry loop ────────────
             for i in range(len(lats)):
                 point = Point(float(lngs[i]), float(lats[i]))
                 for poly in polys:
@@ -953,6 +985,40 @@ class PolygonOptimizer:
                     action_label = "DECREASE RATE"
                     detail = ""
 
+                # GUARD: Never suggest ₹0 payout for polygons with significant AWB volume.
+                # Reducing 20+ active AWBs to ₹0 wipes out hub payout (e.g., ₹50k → ₹0).
+                # Instead, flag these for boundary expansion analysis where the adjacent
+                # ₹0-rate polygon is expanded outward by 0.3–0.5 km to capture the AWBs.
+                if (action_type == "rate_decrease"
+                        and poly["sop_rate"] == 0.0
+                        and poly["awb_count"] > 20):
+                    conservative_saving = round(saving * 0.3, 2)
+                    custom_note = (f" [Custom {poly.get('polygon_radius_km', 0):.1f}km radius]"
+                                   if is_custom else "")
+                    changes.append({
+                        "polygon": poly["cluster_code"],
+                        "pincode": poly["pincode"],
+                        "distance_km": poly["centroid_distance_km"],
+                        "from_rate": poly["actual_rate"],
+                        "to_rate": poly["actual_rate"],  # no rate change
+                        "awb_affected": poly["awb_count"],
+                        "monthly_saving": conservative_saving,
+                        "is_exception": False,
+                        "is_custom_radius": is_custom,
+                        "action": (
+                            f"EXPAND INNER BOUNDARY: {poly['awb_count']} AWBs paying "
+                            f"₹{poly['actual_rate']:.1f} near hub ({poly['centroid_distance_km']:.1f}km). "
+                            f"Expand adjacent ₹0 ring outward by 0.3–0.5 km to capture them "
+                            f"(est. save ₹{conservative_saving:,.0f}/mo). "
+                            f"Use 'Boundary Expansion' analysis for exact km step."
+                            f"{custom_note}"
+                        ),
+                        "type": "boundary_expansion_needed",
+                    })
+                    hub_saving += conservative_saving
+                    new_cost -= conservative_saving
+                    continue
+
                 custom_note = f" [Custom {poly.get('polygon_radius_km', 0):.1f}km radius]" if is_custom else ""
                 changes.append({
                     "polygon": poly["cluster_code"],
@@ -1049,6 +1115,172 @@ class PolygonOptimizer:
 
         self._suggestions = result
         return result
+
+    # ──────────────────────────────────────────────────
+    #  PUBLIC API: suggest_boundary_expansions
+    # ──────────────────────────────────────────────────
+
+    def suggest_boundary_expansions(self) -> pd.DataFrame:
+        """For each hub, suggest small polygon boundary expansions that move AWBs
+        from a higher-rate ring into the adjacent lower-rate ring.
+
+        Example: 500 AWBs land at 4.05–4.30 km and pay ₹1 (C3 ring).
+        Expanding the ₹0 (C1) ring from 4.00 km → 4.30 km captures them at ₹0
+        — saving ₹500/month without touching any rate.
+
+        Uses DuckDB haversine SQL on the AWB parquet — no full in-memory load.
+        Returns DataFrame:
+            hub_name, cluster_code, boundary_km, current_radius_km,
+            suggested_radius_km, expansion_km, inner_rate, outer_rate,
+            awbs_capturable, monthly_saving, annual_saving, action
+        """
+        if not HAS_DUCKDB:
+            return pd.DataFrame()
+        if not self.awb_parquet_path or not os.path.exists(self.awb_parquet_path):
+            return pd.DataFrame()
+
+        metrics = self._compute_spatial_metrics()
+        if metrics.empty:
+            return pd.DataFrame()
+
+        # Hub → (lat, lon) lookup from spatial metrics
+        hub_locs = {}
+        for _, row in metrics.drop_duplicates("hub_name").iterrows():
+            hn = str(row["hub_name"])
+            lat = float(row.get("hub_lat", 0) or 0)
+            lon = float(row.get("hub_lon", 0) or 0)
+            if lat != 0 and lon != 0:
+                hub_locs[hn] = (lat, lon)
+        if not hub_locs:
+            return pd.DataFrame()
+
+        EXPANSION_STEPS = [0.30, 0.50]  # km options to suggest
+        BATCH = 20  # hubs per DuckDB query
+        suggestions = []
+        hub_names = list(hub_locs.keys())
+
+        for batch_start in range(0, len(hub_names), BATCH):
+            batch = hub_names[batch_start: batch_start + BATCH]
+            hub_locs_batch = {hn: hub_locs[hn] for hn in batch}
+
+            # Build SQL VALUES for hub locations (escape single quotes in names)
+            vals = ", ".join(
+                f"('{hn.replace(chr(39), chr(39)*2)}', {lat}, {lon})"
+                for hn, (lat, lon) in hub_locs_batch.items()
+            )
+            hub_in = ", ".join(f"'{h.replace(chr(39), chr(39)*2)}'" for h in batch)
+
+            try:
+                con = duckdb.connect()
+                sql = f"""
+                    WITH hub_locs(hub_name, hub_lat, hub_lon) AS (VALUES {vals}),
+                    awb_raw AS (
+                        SELECT CAST(hub AS VARCHAR) AS hub,
+                               TRY_CAST(lat  AS DOUBLE) AS lat,
+                               TRY_CAST(long AS DOUBLE) AS lng
+                        FROM read_parquet('{self.awb_parquet_path}')
+                        WHERE CAST(hub AS VARCHAR) IN ({hub_in})
+                          AND TRY_CAST(lat  AS DOUBLE) BETWEEN 6 AND 38
+                          AND TRY_CAST(long AS DOUBLE) BETWEEN 68 AND 98
+                    )
+                    SELECT a.hub,
+                           2 * 6371.0 * ASIN(SQRT(
+                               POWER(SIN(RADIANS(a.lat - l.hub_lat) / 2), 2) +
+                               COS(RADIANS(l.hub_lat)) * COS(RADIANS(a.lat)) *
+                               POWER(SIN(RADIANS(a.lng - l.hub_lon) / 2), 2)
+                           )) AS dist_km
+                    FROM awb_raw a
+                    JOIN hub_locs l ON a.hub = l.hub_name
+                    WHERE a.lat IS NOT NULL AND a.lng IS NOT NULL
+                """
+                dist_df = con.execute(sql).fetchdf()
+                con.close()
+            except Exception as e:
+                print(f"suggest_boundary_expansions DuckDB error (batch {batch_start}): {e}")
+                continue
+
+            if dist_df.empty:
+                continue
+
+            for hub_name in batch:
+                hub_dists = dist_df[dist_df["hub"] == hub_name]["dist_km"].values
+                if len(hub_dists) == 0:
+                    continue
+
+                hub_polys = metrics[metrics["hub_name"] == hub_name]
+
+                for boundary in SOP_RING_BOUNDARIES:
+                    inner_rate = _get_sop_rate(max(0, boundary - 0.1))
+                    outer_rate = _get_sop_rate(boundary + 0.1)
+                    if inner_rate >= outer_rate:
+                        continue  # no saving from expanding inward
+
+                    rate_saving_per_awb = outer_rate - inner_rate
+
+                    for step_km in EXPANSION_STEPS:
+                        mask = (hub_dists >= boundary) & (hub_dists < boundary + step_km)
+                        awb_count = int(mask.sum())
+                        if awb_count < 5:
+                            continue
+                        monthly_saving = round(awb_count * rate_saving_per_awb, 2)
+                        if monthly_saving < 100:
+                            continue
+
+                        # Find the inner polygon (actual_rate ≈ inner_rate, max_dist near boundary)
+                        cands = hub_polys[
+                            hub_polys["actual_rate"].apply(
+                                lambda r: abs(float(r) - inner_rate) < 0.1
+                            ) &
+                            (hub_polys["max_distance_km"] >= boundary - 2.0) &
+                            (hub_polys["max_distance_km"] <= boundary + 1.0)
+                        ]
+                        if cands.empty:
+                            cands = hub_polys[
+                                hub_polys["actual_rate"].apply(
+                                    lambda r: abs(float(r) - inner_rate) < 0.1
+                                )
+                            ]
+
+                        if cands.empty:
+                            cluster_code = "—"
+                            current_radius = round(float(boundary), 2)
+                        else:
+                            best = cands.sort_values("max_distance_km", ascending=False).iloc[0]
+                            cluster_code = str(best["cluster_code"])
+                            current_radius = round(float(best["max_distance_km"]), 2)
+
+                        suggested_radius = round(boundary + step_km, 2)
+                        suggestions.append({
+                            "hub_name": hub_name,
+                            "cluster_code": cluster_code,
+                            "boundary_km": boundary,
+                            "current_radius_km": current_radius,
+                            "suggested_radius_km": suggested_radius,
+                            "expansion_km": step_km,
+                            "inner_rate": inner_rate,
+                            "outer_rate": outer_rate,
+                            "awbs_capturable": awb_count,
+                            "monthly_saving": monthly_saving,
+                            "annual_saving": round(monthly_saving * 12, 2),
+                            "action": (
+                                f"EXPAND {cluster_code} at {boundary}km: "
+                                f"{current_radius:.2f}km → {suggested_radius:.2f}km "
+                                f"(+{step_km:.2f}km). Moves {awb_count} AWBs from "
+                                f"₹{outer_rate:.1f} → ₹{inner_rate:.1f}. "
+                                f"Saves ₹{monthly_saving:,.0f}/mo "
+                                f"(₹{monthly_saving*12:,.0f}/yr)."
+                            ),
+                        })
+
+        if not suggestions:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(suggestions)
+        # Keep best saving per (hub, boundary, step) — no duplicates
+        df = (df.sort_values("monthly_saving", ascending=False)
+                .drop_duplicates(subset=["hub_name", "boundary_km", "expansion_km"])
+                .reset_index(drop=True))
+        return df
 
     # ──────────────────────────────────────────────────
     #  PUBLIC API: generate_before_after
