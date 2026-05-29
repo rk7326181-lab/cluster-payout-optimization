@@ -1212,8 +1212,14 @@ def _stream_to_parquet(query_job, parquet_path, progress_cb=None, start_pct=0.72
     total_rows_est = None
 
     try:
-        # Public iterator — works regardless of destination/permissions.
-        rows_iter = query_job.result(page_size=PAGE_SIZE)
+        # Explicitly disable BQ Storage Read API so read-only users (no
+        # bigquery.readsessions.create permission) can still stream results.
+        # create_bqstorage_client kwarg added in google-cloud-bigquery 3.0 —
+        # fall back gracefully for older library installs.
+        try:
+            rows_iter = query_job.result(page_size=PAGE_SIZE, create_bqstorage_client=False)
+        except TypeError:
+            rows_iter = query_job.result(page_size=PAGE_SIZE)
         total_rows_est = getattr(rows_iter, "total_rows", None)
         if total_rows_est and progress_cb:
             progress_cb(start_pct, f"⬇️ Streaming {total_rows_est:,} rows to parquet…")
@@ -1253,7 +1259,27 @@ def _stream_to_parquet(query_job, parquet_path, progress_cb=None, start_pct=0.72
                 query_job, parquet_path, progress_cb, start_pct + 0.05, end_pct
             )
         except Exception as e2:
-            raise Exception(f"Both page-stream and BQ-storage stream failed: {e2}")
+            # Final fallback: plain REST to_dataframe.
+            # Not memory-safe for 11M+ rows on 1 GB instances, but better than
+            # crashing. Triggered only if both streaming paths are unavailable
+            # (e.g. library version missing to_arrow_iterable and readsessions
+            # permission denied).
+            print(f"Both streaming paths failed — using REST to_dataframe fallback: {e2}")
+            if progress_cb:
+                progress_cb(start_pct + 0.02, "⬇️ Downloading via REST fallback…")
+            try:
+                df = _safe_to_dataframe(query_job, use_bqstorage=False)
+                os.makedirs(os.path.dirname(parquet_path), exist_ok=True)
+                df.to_parquet(parquet_path, index=False)
+                rows_written = len(df)
+                if progress_cb:
+                    progress_cb(end_pct, f"✅ {rows_written:,} rows downloaded via REST")
+                return rows_written
+            except Exception as e3:
+                raise Exception(
+                    f"AWB fetch failed — all methods exhausted. "
+                    f"Page-stream: {e}. BQ-storage: {e2}. REST: {e3}"
+                )
     finally:
         if writer:
             try: writer.close()
@@ -1313,19 +1339,39 @@ def _bqstorage_stream_to_parquet(query_job, parquet_path, progress_cb, start_pct
     import pyarrow as pa
     import pyarrow.parquet as pq
 
-    # to_arrow_iterable returns an iterator of pyarrow.RecordBatch
+    # to_arrow_iterable returns an iterator of pyarrow.RecordBatch.
+    # This method was renamed / may not exist in all library versions.
+    # AttributeError = method absent; TypeError = signature mismatch.
+    # Both mean we should fall back to the REST arrow iterable path.
+    batches = None
     try:
         batches = query_job.to_arrow_iterable(create_bqstorage_client=True)
-    except TypeError:
-        batches = query_job.result().to_arrow_iterable()
+    except (TypeError, AttributeError):
+        # Method missing or signature changed — fall through to REST path below
+        pass
     except Exception as e:
-        # readsessions permission denied → REST arrow stream (slower but works)
         msg = str(e)
         if "readsessions" in msg.lower() or "403" in msg or "PERMISSION_DENIED" in msg:
             print(f"bqstorage unavailable ({msg.splitlines()[0][:120]}) — using REST arrow")
-            batches = query_job.result().to_arrow_iterable()
+            # fall through to REST path below
         else:
             raise
+
+    if batches is None:
+        # REST-based Arrow iterable — no Storage Read API permission needed
+        try:
+            _ri = query_job.result(create_bqstorage_client=False)
+        except TypeError:
+            _ri = query_job.result()
+        try:
+            batches = _ri.to_arrow_iterable()
+        except AttributeError:
+            # RowIterator.to_arrow_iterable also absent in this library version —
+            # raise so the caller's final REST-to_dataframe fallback takes over.
+            raise AttributeError(
+                "to_arrow_iterable not available in the installed google-cloud-bigquery "
+                "version and readsessions permission is absent; REST fallback will be used."
+            )
 
     writer = None
     rows_written = 0
