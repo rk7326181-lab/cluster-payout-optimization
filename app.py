@@ -3251,22 +3251,21 @@ with tab5:
                 _ms_hub_df = _full_hubs
             _ms_renderer = MapRenderer()
 
-            # ── AWB stats: spatial PIP (preferred) or pincode dict (fallback) ──
-            # PIP stats (gpd.sjoin) give true per-polygon accuracy.
-            # Pincode dict is used when AWB coordinate data isn't loaded.
+            # ── AWB stats: DuckDB on full parquet (primary) or PIP sample (fallback) ──
+            # get_hub_pincode_counts() reads the entire AWB parquet (7M+ rows) via
+            # DuckDB GROUP BY — gives accurate counts for every hub+pincode pair.
+            # _pip_awb_stats is only a 50k-100k sample → would undercount by 100x+
+            # on large AWB datasets, causing burn to show ₹0 for most hubs.
             _cluster_awb_stats = {}
-            _ensure_pip_stats()
-            _pip_stats = st.session_state.get("_pip_awb_stats")
+            _hub_pin_counts = st.session_state.get("_hub_pin_counts_cache")
+            if _hub_pin_counts is None:
+                _hub_pin_counts = get_hub_pincode_counts()
+                if _hub_pin_counts:
+                    st.session_state["_hub_pin_counts_cache"] = _hub_pin_counts
 
-            if _pip_stats:
-                # True spatial assignment — gpd.sjoin result scoped to this
-                # filtered cluster set (clusters not in the filter just get 0).
-                _cluster_awb_stats = {
-                    cc: _pip_stats[cc]
-                    for cc in _ms_proc["cluster_code"].astype(str).unique()
-                    if cc in _pip_stats
-                }
-            else:
+            _pip_stats = None  # only used as last-resort fallback below
+
+            if _hub_pin_counts:
                 # ── Fallback: DuckDB pincode aggregation ──
                 _hub_pin_counts = st.session_state.get("_hub_pin_counts_cache")
                 if _hub_pin_counts is None:
@@ -3332,6 +3331,18 @@ with tab5:
                             "total_cost": round(_awb_n * _rate, 1),
                             "rate": _rate,
                         }
+            else:
+                # ── Last-resort fallback: PIP stats on AWB sample ──
+                # Only reached when parquet doesn't exist (e.g. no AWB fetch yet).
+                # Note: sample-based counts will undercount on large AWB datasets.
+                _ensure_pip_stats()
+                _pip_stats = st.session_state.get("_pip_awb_stats")
+                if _pip_stats:
+                    _cluster_awb_stats = {
+                        cc: _pip_stats[cc]
+                        for cc in _ms_proc["cluster_code"].astype(str).unique()
+                        if cc in _pip_stats
+                    }
 
             # ── Build cluster GeoJSON with AWB stats (vectorized) ──
             # Reduce numeric precision further when the polygon count is huge

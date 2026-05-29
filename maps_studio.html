@@ -976,6 +976,11 @@ function loadHubData(){
     if(_hexUnmatched>0&&_hexMatched===0){
       console.warn('[HexViz] 0 hex cells matched — hub names in AWB data may differ from cluster hub names. Sample AWB hub:',precomputedHex[0]?.hub,' | Sample cluster hub:',Object.values(hubRegistry)[0]?.name);
     }
+    // Auto-enable AWB hexbin layer when real data is present
+    // so the user sees hexagons immediately without a manual button click.
+    if(_hexMatched>0&&!awbVisible){
+      setTimeout(()=>toggleAWBLayer(),400);
+    }
   } else if(awbData&&awbData.length){
     // Fallback: compute hexbins from raw AWB sample points
     const hubAwbPts={};
@@ -993,6 +998,10 @@ function loadHubData(){
       _hexCellsByHub[hid]=hexBinPoints(pts,HEX_SIZE);
     });
     console.log('[HexViz] Computed hexbins from',awbData.length,'raw AWB points for',Object.keys(_hexCellsByHub).length,'hubs');
+    // Auto-enable for sample-based hexbins too
+    if(Object.keys(_hexCellsByHub).length>0&&!awbVisible){
+      setTimeout(()=>toggleAWBLayer(),400);
+    }
   }
 
   // Render hexbins for a specific hub (called from focusHub)
