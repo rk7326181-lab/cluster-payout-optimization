@@ -12,7 +12,6 @@ from typing import List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
-from shapely.geometry import Point
 from shapely.wkt import loads as load_wkt
 from shapely.prepared import prep
 
@@ -196,39 +195,79 @@ class ClusterBurnCalculator:
 
     # ── Cluster assignment ────────────────────────────────────────────────────
     @staticmethod
-    def _match_point(lat, lon, clusters) -> Tuple[Optional[str], Optional[str]]:
-        if pd.isnull(lat) or pd.isnull(lon):
-            return None, None
-        pt = Point(lon, lat)
-        for c in clusters:
-            if c["prepared"].contains(pt):
-                return c["name"], c["description"]
-        return None, None
-
-    @staticmethod
     def assign_clusters(
         awb_df: pd.DataFrame,
         clusters: list,
         pincode_map: dict,
     ) -> pd.DataFrame:
-        rows = []
-        for row in awb_df.itertuples(index=False):
-            name, desc = ClusterBurnCalculator._match_point(row.lat, row.long, clusters)
-            if not name and row.pincode in pincode_map:
-                name, desc = "Previous mapping", pincode_map[row.pincode]
-            rows.append({
-                "order_date":       row.order_date,
-                "awb_number":       row.fwd_del_awb_number,
-                "rider_id":         row.rider_id,
-                "pincode":          row.pincode,
-                "payment_category": row.payment_category,
-                "hub":              row.hub,
-                "lat":              row.lat,
-                "long":             row.long,
-                "cluster_name":     name,
-                "description":      desc,
-            })
-        return pd.DataFrame(rows)
+        """Vectorised point-in-polygon using geopandas sjoin (Shapely 2 + GEOS).
+        Replaces the old itertuples loop which timed out on large datasets."""
+        import numpy as np
+        import geopandas as gpd
+
+        if awb_df.empty:
+            return pd.DataFrame(columns=[
+                "order_date", "awb_number", "rider_id", "pincode",
+                "payment_category", "hub", "lat", "long",
+                "cluster_name", "description",
+            ])
+
+        n = len(awb_df)
+        lats = pd.to_numeric(awb_df["lat"], errors="coerce").to_numpy()
+        lons = pd.to_numeric(awb_df["long"], errors="coerce").to_numpy()
+        pincodes = awb_df["pincode"].to_numpy()
+
+        cluster_name_col = np.full(n, None, dtype=object)
+        description_col  = np.full(n, None, dtype=object)
+
+        if clusters:
+            valid = ~(np.isnan(lats) | np.isnan(lons))
+            valid_idx = np.where(valid)[0]
+
+            if len(valid_idx):
+                pts_gdf = gpd.GeoDataFrame(
+                    {"_orig_i": valid_idx},
+                    geometry=gpd.points_from_xy(lons[valid_idx], lats[valid_idx]),
+                    crs="EPSG:4326",
+                )
+                polys_gdf = gpd.GeoDataFrame(
+                    {
+                        "cluster_name": [c["name"] for c in clusters],
+                        "description":  [c["description"] for c in clusters],
+                    },
+                    geometry=[c["polygon"] for c in clusters],
+                    crs="EPSG:4326",
+                )
+                joined = gpd.sjoin(pts_gdf, polys_gdf, how="left", predicate="within")
+                joined = joined.drop_duplicates(subset=["_orig_i"])
+                matched = joined[joined["cluster_name"].notna()]
+                if not matched.empty:
+                    mi = matched["_orig_i"].to_numpy().astype(int)
+                    cluster_name_col[mi] = matched["cluster_name"].to_numpy()
+                    description_col[mi]  = matched["description"].to_numpy()
+
+        # Pincode fallback for points that didn't match any polygon
+        unmatched = pd.isnull(cluster_name_col)
+        if unmatched.any() and pincode_map:
+            unmatched_idx = np.where(unmatched)[0]
+            for i in unmatched_idx:
+                pc = pincodes[i]
+                if pc in pincode_map:
+                    cluster_name_col[i] = "Previous mapping"
+                    description_col[i]  = pincode_map[pc]
+
+        return pd.DataFrame({
+            "order_date":       awb_df["order_date"].to_numpy(),
+            "awb_number":       awb_df["fwd_del_awb_number"].to_numpy(),
+            "rider_id":         awb_df["rider_id"].to_numpy(),
+            "pincode":          pincodes,
+            "payment_category": awb_df["payment_category"].to_numpy(),
+            "hub":              awb_df["hub"].to_numpy(),
+            "lat":              lats,
+            "long":             lons,
+            "cluster_name":     cluster_name_col,
+            "description":      description_col,
+        })
 
     # ── P&L ───────────────────────────────────────────────────────────────────
     @staticmethod
@@ -567,11 +606,30 @@ def render_burn_tab(bq_client=None):
         # 4d. Assign clusters for each set, then compute P&L
         with st.spinner(f"Assigning clusters (CSV #1) to {len(awb_df):,} AWB points…"):
             result_df1 = calc.assign_clusters(awb_df, clusters1, pincode_map)
+        n_matched1 = int(result_df1["cluster_name"].notna().sum())
+        if n_matched1 == 0:
+            st.warning(f"⚠ CSV #1: 0 of {len(result_df1):,} AWB points fell inside any cluster polygon. "
+                       "Verify the polygon boundaries cover your hub delivery areas.")
+        else:
+            st.caption(f"CSV #1 — {n_matched1:,} / {len(result_df1):,} points matched a cluster polygon")
+
         with st.spinner(f"Assigning clusters (CSV #2) to {len(awb_df):,} AWB points…"):
             result_df2 = calc.assign_clusters(awb_df, clusters2, pincode_map)
+        n_matched2 = int(result_df2["cluster_name"].notna().sum())
+        if n_matched2 == 0:
+            st.warning(f"⚠ CSV #2: 0 of {len(result_df2):,} AWB points fell inside any cluster polygon. "
+                       "Verify the polygon boundaries cover your hub delivery areas.")
+        else:
+            st.caption(f"CSV #2 — {n_matched2:,} / {len(result_df2):,} points matched a cluster polygon")
 
         pnl_df1 = calc.calculate_pnl(result_df1)
         pnl_df2 = calc.calculate_pnl(result_df2)
+
+        if pnl_df1.empty and pnl_df2.empty:
+            st.warning("No P&L rows to display — all AWB points had zero net difference between "
+                       "pincode payout and cluster payout. Check that your description column uses "
+                       "the C1–C20 format (e.g. C4, C8) and that polygons cover the delivery coordinates.")
+            return
 
         # Store both runs
         st.session_state["burn_pnl_df"]   = pnl_df1   # kept for legacy downloads
