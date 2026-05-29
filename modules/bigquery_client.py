@@ -1134,7 +1134,8 @@ def _precompute_hexbin_cache(df):
         if len(sample_df) > SAMPLE_SIZE:
             _total = len(sample_df)
             sample_result = sample_df.groupby("hub", group_keys=False).apply(
-                lambda g: g.sample(n=max(1, min(len(g), round(SAMPLE_SIZE * len(g) / _total))), random_state=42)
+                lambda g: g.sample(n=max(1, min(len(g), round(SAMPLE_SIZE * len(g) / _total))), random_state=42),
+                include_groups=False,
             ).head(SAMPLE_SIZE)
         else:
             sample_result = sample_df
@@ -1584,19 +1585,25 @@ def _precompute_hexbin_from_parquet(parquet_path):
 
     except Exception as e:
         print(f"_precompute_hexbin_from_parquet DuckDB error: {e}")
-        # Last-resort fallback: read only 4 columns with DuckDB and process in pandas
+        # Fallback: use a 200k-row random sample via DuckDB USING SAMPLE.
+        # Avoids loading the full file into pandas (which OOMs on 1 GB instances).
         try:
             con2 = duckdb.connect()
             slim = con2.execute("""
                 SELECT CAST(hub AS VARCHAR) AS hub, CAST(pincode AS VARCHAR) AS pincode,
                        CAST(lat AS DOUBLE) AS lat, CAST(long AS DOUBLE) AS long
                 FROM read_parquet(?)
+                USING SAMPLE 200000
                 WHERE lat IS NOT NULL AND long IS NOT NULL AND lat != 0 AND long != 0
             """, [parquet_path]).fetchdf()
             con2.close()
-            _precompute_hexbin_cache(slim)
+            if len(slim) > 0:
+                _precompute_hexbin_cache(slim)
+                print(f"_precompute_hexbin_from_parquet: used 200k sample fallback ({len(slim):,} rows)")
         except Exception as e2:
-            print(f"_precompute_hexbin_from_parquet fallback also failed: {e2}")
+            print(f"_precompute_hexbin_from_parquet 200k-sample fallback also failed: {e2}")
+            # Note: fetch_awb_data() already built hexbins from the 50k session sample
+            # before calling this function, so Maps Studio still has real hexbin data.
 
 
 def _build_hexbin_json(agg_df, sample_df, HEX_SIZE, SQRT3):
@@ -1701,19 +1708,38 @@ def fetch_awb_data(client, cluster_df=None, force_refresh=False, progress_cb=Non
         with open(_get_awb_cache_meta_path(), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False)
 
+        # ── Load session sample first so we can use it as a reliable hexbin source ──
         if progress_cb:
-            progress_cb(0.90, f"🔢 Computing AWB hexbins via DuckDB ({total_rows:,} rows)...")
-
-        # Compute hexbins entirely via DuckDB SQL — never loads 11M rows into pandas
-        _precompute_hexbin_from_parquet(cache_parquet)
-
-        # Return a small sample for session state (PIP stats, sidebar display)
-        if progress_cb:
-            progress_cb(0.97, "📋 Loading 50k sample for session...")
+            progress_cb(0.89, "📋 Loading 50k session sample…")
         sample_df = _load_session_sample(cache_parquet, n=50_000)
 
+        # ── Step 1: Build hexbins from the sample (ALWAYS works, real hub names) ──
+        # This runs first so Maps Studio always gets real hexagons even if the
+        # full-parquet computation below fails on low-RAM cloud instances.
+        if len(sample_df) > 0:
+            if progress_cb:
+                progress_cb(0.91, f"⬡ Building hexbin base from sample ({len(sample_df):,} rows)…")
+            try:
+                _precompute_hexbin_cache(sample_df)
+            except Exception as _hex_sample_err:
+                print(f"Sample hexbin build failed: {_hex_sample_err}")
+
+        # ── Step 2: Enhance hexbins from the full parquet via DuckDB ──
+        # Better spatial resolution — all rows counted, not just the 50k sample.
+        # If this fails (OOM on 1 GB Streamlit Cloud), we keep the Step 1 hexbins.
         if progress_cb:
-            progress_cb(1.0, f"✅ {total_rows:,} AWB records saved. Session sample: {len(sample_df):,} rows.")
+            progress_cb(0.93, f"🔢 Enhancing hexbins from full parquet ({total_rows:,} rows)…")
+        try:
+            _precompute_hexbin_from_parquet(cache_parquet)
+            if progress_cb:
+                progress_cb(0.97, "✅ Hexbins built from full dataset")
+        except Exception as _hex_full_err:
+            print(f"Full parquet hexbin build failed (sample hexbins kept): {_hex_full_err}")
+            if progress_cb:
+                progress_cb(0.97, "⬡ Using sample hexbins (full-parquet build failed)")
+
+        if progress_cb:
+            progress_cb(1.0, f"✅ {total_rows:,} AWB records saved. Sample: {len(sample_df):,} rows.")
         return sample_df, None
 
     except GoogleAPIError as e:
