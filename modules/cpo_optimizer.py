@@ -39,26 +39,47 @@ class CPOOptimizer:
             self.load_excel_data(excel_path)
     
     def load_excel_data(self, excel_path):
-        """Load CPO and SOP data from Excel file"""
+        """Load CPO and SOP data from Excel file.
+
+        Fast-fails when the expected legacy sheet names are absent (e.g. the
+        new hub_wise/structure_wise format) so we don't hang for 15+ minutes
+        while openpyxl parses the entire shared-strings table of a large file.
+        """
+        NEEDED = {'Working sheet', 'SOP compliant', 'Non SOP'}
         try:
-            # Load working sheet with CPO data
+            # Read sheet names only — openpyxl read_only parses workbook.xml
+            # (< 1 KB) and returns immediately, no data loaded yet.
+            import openpyxl
+            _wb = openpyxl.load_workbook(excel_path, read_only=True)
+            available = set(_wb.sheetnames)
+            _wb.close()
+
+            if not NEEDED.issubset(available):
+                missing = NEEDED - available
+                print(
+                    f"CPOOptimizer: sheets {missing} not found in this file "
+                    f"(available: {sorted(available)}). "
+                    f"This file uses the hub_wise format — CPOAnalytics will "
+                    f"handle it; CPOOptimizer pincode enrichment is skipped."
+                )
+                self.cpo_data = {}
+                self.sop_data = {'compliant': set(), 'non_compliant': set()}
+                return
+
+            # Expected sheets exist — safe to read (no large shared-strings penalty)
             working_df = pd.read_excel(excel_path, sheet_name='Working sheet')
-            
-            # Create pincode to CPO lookup
             self.cpo_data = working_df.set_index('Pincode')['CPO'].to_dict()
-            
-            # Load SOP compliance data
+
             sop_compliant = pd.read_excel(excel_path, sheet_name='SOP compliant')
-            non_sop = pd.read_excel(excel_path, sheet_name='Non SOP')
-            
+            non_sop       = pd.read_excel(excel_path, sheet_name='Non SOP')
             self.sop_data = {
-                'compliant': set(sop_compliant['Pincode'].unique()) if 'Pincode' in sop_compliant.columns else set(),
-                'non_compliant': set(non_sop['Pincode'].unique()) if 'Pincode' in non_sop.columns else set()
+                'compliant':     set(sop_compliant['Pincode'].unique()) if 'Pincode' in sop_compliant.columns else set(),
+                'non_compliant': set(non_sop['Pincode'].unique())       if 'Pincode' in non_sop.columns       else set(),
             }
-            
             print(f"Loaded CPO data for {len(self.cpo_data)} pincodes")
-            print(f"Loaded SOP data: {len(self.sop_data['compliant'])} compliant, {len(self.sop_data['non_compliant'])} non-compliant")
-            
+            print(f"Loaded SOP data: {len(self.sop_data['compliant'])} compliant, "
+                  f"{len(self.sop_data['non_compliant'])} non-compliant")
+
         except Exception as e:
             print(f"Warning: Could not load Excel data: {e}")
             self.cpo_data = {}
@@ -113,13 +134,17 @@ class CPOOptimizer:
         )
         enriched_df['annual_saving_potential'] = enriched_df['monthly_saving_potential'] * 12
         
-        # Calculate optimization priority
-        enriched_df['optimization_priority'] = enriched_df.apply(
-            lambda row: self._calculate_priority(
-                row.get('excess_cpo', 0),
-                row.get('monthly_saving_potential', 0)
-            ),
-            axis=1
+        # Calculate optimization priority — vectorised (no row-by-row Python loop)
+        _exc = enriched_df['excess_cpo'].fillna(0)
+        _sav = enriched_df['monthly_saving_potential'].fillna(0)
+        enriched_df['optimization_priority'] = np.select(
+            [
+                (_exc > 1.5) & (_sav > 2000),
+                (_exc > 1.0) | (_sav > 1500),
+                (_exc > 0.5) | (_sav > 1000),
+            ],
+            ['Critical', 'High', 'Medium'],
+            default='Low',
         )
         
         return enriched_df
