@@ -950,15 +950,15 @@ def _normalize_awb_df(df):
 
 
 def _compute_pip_stats(awb_df, processed_df, show_progress=False):
-    """
-    Match AWB coordinates to cluster polygons using STRtree spatial index.
+    """Match AWB coordinates to cluster polygons using geopandas sjoin.
     Returns dict: cluster_code → {awb_count, total_cost, rate}
     """
-    from shapely.geometry import Point
-    from shapely.strtree import STRtree
+    import geopandas as gpd
 
     stats = {}
     if awb_df is None or len(awb_df) == 0 or processed_df is None:
+        return stats
+    if 'geometry' not in processed_df.columns:
         return stats
 
     lng_c = "long" if "long" in awb_df.columns else ("lng" if "lng" in awb_df.columns else "longitude")
@@ -966,67 +966,60 @@ def _compute_pip_stats(awb_df, processed_df, show_progress=False):
     if lat_c not in awb_df.columns or lng_c not in awb_df.columns:
         return stats
 
-    coords = awb_df[[lat_c, lng_c]].copy()
-    coords = coords.dropna()
-    coords[lat_c] = pd.to_numeric(coords[lat_c], errors='coerce')
-    coords[lng_c] = pd.to_numeric(coords[lng_c], errors='coerce')
-    coords = coords.dropna()
-    coords = coords[(coords[lat_c] != 0) & (coords[lng_c] != 0)]
-
-    if len(coords) == 0 or 'geometry' not in processed_df.columns:
+    lats = pd.to_numeric(awb_df[lat_c], errors='coerce')
+    lons = pd.to_numeric(awb_df[lng_c], errors='coerce')
+    valid = lats.notna() & lons.notna() & (lats != 0) & (lons != 0)
+    if not valid.any():
         return stats
-
-    # Build polygon list
-    polys, poly_cc, poly_rate = [], [], []
-    geom_idx = list(processed_df.columns).index('geometry')
-    for row in processed_df.itertuples(index=False):
-        g = row[geom_idx]
-        if g is None or (hasattr(g, 'is_empty') and g.is_empty):
-            continue
-        if not g.is_valid:
-            g = g.buffer(0)
-        polys.append(g)
-        poly_cc.append(str(getattr(row, 'cluster_code', '')))
-        poly_rate.append(float(getattr(row, 'surge_amount', 0)))
-
-    if not polys:
-        return stats
-
-    tree = STRtree(polys)
-    counts = {cc: 0 for cc in poly_cc}
-    rates_map = dict(zip(poly_cc, poly_rate))
-
-    lats = coords[lat_c].values
-    lngs = coords[lng_c].values
-    total = len(lats)
-    matched = 0
 
     pip_bar = None
     if show_progress:
-        pip_bar = st.progress(0, text=f"Matching {total:,} AWBs to {len(polys):,} polygons...")
+        pip_bar = st.progress(10, text=f"Building spatial index for {valid.sum():,} AWBs…")
 
-    batch = 10000
-    for start in range(0, total, batch):
-        end = min(start + batch, total)
-        for i in range(start, end):
-            pt = Point(lngs[i], lats[i])
-            candidates = tree.query(pt)
-            for idx in candidates:
-                if polys[idx].contains(pt):
-                    counts[poly_cc[idx]] += 1
-                    matched += 1
-                    break
-        if pip_bar:
-            pct = min(int((end / total) * 100), 100)
-            pip_bar.progress(pct, text=f"Matching AWBs: {end:,}/{total:,} processed • {matched:,} matched")
+    pts_gdf = gpd.GeoDataFrame(
+        {"_i": np.arange(valid.sum())},
+        geometry=gpd.points_from_xy(lons[valid].values, lats[valid].values),
+        crs="EPSG:4326",
+    )
+
+    valid_polys = processed_df[processed_df['geometry'].apply(
+        lambda g: g is not None and not (hasattr(g, 'is_empty') and g.is_empty)
+    )]
+    if valid_polys.empty:
+        return stats
+
+    polys_gdf = gpd.GeoDataFrame(
+        {
+            "cluster_code": valid_polys["cluster_code"].astype(str).values,
+            "rate": pd.to_numeric(valid_polys["surge_amount"], errors='coerce').fillna(0).values,
+        },
+        geometry=[g.buffer(0) if not g.is_valid else g for g in valid_polys["geometry"].values],
+        crs="EPSG:4326",
+    )
 
     if pip_bar:
-        pip_bar.empty()
+        pip_bar.progress(30, text=f"Spatial join: {len(pts_gdf):,} points × {len(polys_gdf):,} polygons…")
 
-    for cc in counts:
-        cnt = counts[cc]
-        r = rates_map[cc]
+    joined = gpd.sjoin(pts_gdf, polys_gdf, how="left", predicate="within")
+    joined = joined.drop_duplicates(subset=["_i"])
+    matched = joined[joined["cluster_code"].notna()]
+    counts = matched.groupby("cluster_code").size().to_dict()
+
+    if pip_bar:
+        pip_bar.progress(90, text=f"Aggregating — {sum(counts.values()):,} AWBs matched to {len(counts):,} clusters…")
+
+    rates_map = dict(zip(
+        valid_polys["cluster_code"].astype(str).values,
+        pd.to_numeric(valid_polys["surge_amount"], errors='coerce').fillna(0).values,
+    ))
+    for cc in rates_map:
+        cnt = counts.get(cc, 0)
+        r = float(rates_map[cc])
         stats[cc] = {"awb_count": cnt, "total_cost": round(cnt * r, 1), "rate": r}
+
+    if pip_bar:
+        pip_bar.progress(100, text=f"Done — {sum(counts.values()):,} AWBs matched")
+        pip_bar.empty()
 
     return stats
 
@@ -3012,84 +3005,87 @@ with tab5:
                 _ms_hub_df = _full_hubs
             _ms_renderer = MapRenderer()
 
-            # ── Fast AWB stats via DuckDB (no full DataFrame load) ──
-            _hub_pin_counts = st.session_state.get("_hub_pin_counts_cache")
-            if _hub_pin_counts is None:
-                _hub_pin_counts = get_hub_pincode_counts()
-                if _hub_pin_counts:
-                    st.session_state["_hub_pin_counts_cache"] = _hub_pin_counts
-
+            # ── AWB stats: spatial PIP (preferred) or pincode dict (fallback) ──
+            # PIP stats (gpd.sjoin) give true per-polygon accuracy.
+            # Pincode dict is used when AWB coordinate data isn't loaded.
             _cluster_awb_stats = {}
-            if _hub_pin_counts:
-                # ── Build hub-name mapping via lat/long for renamed hubs ──
-                # Use the full hub location file (11K+ hubs) instead of session hub_df
-                # (which only has ~1K hubs from cluster data) so renamed hubs can be matched.
-                _awb_hub_names = set(k[0] for k in _hub_pin_counts.keys())
-                _hub_name_map = {}  # cluster_hub_name -> awb_hub_name
-                _full_hub_csv = None
-                _manifest = DataLoader().get_cache_manifest()
-                if _manifest:
-                    _full_hub_csv = _manifest.get("hub_csv")
-                if _full_hub_csv and Path(_full_hub_csv).exists():
-                    # Memory: only read the columns we actually use, and force
-                    # compact dtypes — the full hub CSV can be 15k+ rows.
-                    _usecols = [c for c in ("name", "hub_name", "latitude", "longitude")]
-                    _loc_df = pd.read_csv(
-                        _full_hub_csv,
-                        usecols=lambda c: c in _usecols,
-                        dtype={"name": "string", "hub_name": "string",
-                               "latitude": "float32", "longitude": "float32"},
-                    ).dropna(subset=["latitude", "longitude"])
-                    _loc_df["lat_r"] = _loc_df["latitude"].round(3)
-                    _loc_df["lng_r"] = _loc_df["longitude"].round(3)
-                    # Group all hub names by rounded location
-                    _loc_to_names = {}
-                    _name_col = "name" if "name" in _loc_df.columns else "hub_name"
-                    for _, _r in _loc_df.iterrows():
-                        _n = str(_r.get(_name_col, ""))
-                        _lk = (_r["lat_r"], _r["lng_r"])
-                        _loc_to_names.setdefault(_lk, []).append(_n)
-                    # For each cluster hub_name not in AWB, find AWB name at same location
-                    _cluster_hub_names = set(_ms_proc["hub_name"].dropna().unique())
-                    for _ch in _cluster_hub_names - _awb_hub_names:
-                        _ch_row = _loc_df[_loc_df[_name_col] == _ch]
-                        if _ch_row.empty:
-                            continue
-                        _lk = (_ch_row.iloc[0]["lat_r"], _ch_row.iloc[0]["lng_r"])
-                        for _candidate in _loc_to_names.get(_lk, []):
-                            if _candidate in _awb_hub_names:
-                                _hub_name_map[_ch] = _candidate
-                                break
+            _ensure_pip_stats()
+            _pip_stats = st.session_state.get("_pip_awb_stats")
 
-                # ── Build pincode-only fallback counts ──
-                _pin_only_counts = {}
-                for (_h, _p), _c in _hub_pin_counts.items():
-                    _pin_only_counts[_p] = _pin_only_counts.get(_p, 0) + _c
+            if _pip_stats:
+                # True spatial assignment — gpd.sjoin result scoped to this
+                # filtered cluster set (clusters not in the filter just get 0).
+                _cluster_awb_stats = {
+                    cc: _pip_stats[cc]
+                    for cc in _ms_proc["cluster_code"].astype(str).unique()
+                    if cc in _pip_stats
+                }
+            else:
+                # ── Fallback: DuckDB pincode aggregation ──
+                _hub_pin_counts = st.session_state.get("_hub_pin_counts_cache")
+                if _hub_pin_counts is None:
+                    _hub_pin_counts = get_hub_pincode_counts()
+                    if _hub_pin_counts:
+                        st.session_state["_hub_pin_counts_cache"] = _hub_pin_counts
 
-                # Map each cluster polygon to its AWB count via hub_name+pincode
-                for _t in _ms_proc.itertuples(index=False):
-                    _cc = str(getattr(_t, 'cluster_code', ''))
-                    _hname = str(getattr(_t, 'hub_name', ''))
-                    _pin_raw = getattr(_t, 'pincode', '')
-                    # Fix pincode format: strip '.0' from float-converted pincodes
-                    try:
-                        _pin = str(int(float(_pin_raw))) if _pin_raw not in (None, '', 'nan') else ''
-                    except (ValueError, TypeError):
-                        _pin = str(_pin_raw).replace('.0', '').strip()
-                    _rate = float(getattr(_t, 'surge_amount', 0))
-                    # 1) Exact hub_name + pincode match
-                    _awb_n = _hub_pin_counts.get((_hname, _pin), 0)
-                    # 2) Lat/long-mapped hub name fallback
-                    if _awb_n == 0 and _hname in _hub_name_map:
-                        _awb_n = _hub_pin_counts.get((_hub_name_map[_hname], _pin), 0)
-                    # 3) Pincode-only fallback (all hubs serving this pincode)
-                    if _awb_n == 0:
-                        _awb_n = _pin_only_counts.get(_pin, 0)
-                    _cluster_awb_stats[_cc] = {
-                        "awb_count": _awb_n,
-                        "total_cost": round(_awb_n * _rate, 1),
-                        "rate": _rate,
-                    }
+                if _hub_pin_counts:
+                    # Build hub-name mapping via lat/long for renamed hubs
+                    _awb_hub_names = set(k[0] for k in _hub_pin_counts.keys())
+                    _hub_name_map = {}
+                    _full_hub_csv = None
+                    _manifest = DataLoader().get_cache_manifest()
+                    if _manifest:
+                        _full_hub_csv = _manifest.get("hub_csv")
+                    if _full_hub_csv and Path(_full_hub_csv).exists():
+                        _usecols = [c for c in ("name", "hub_name", "latitude", "longitude")]
+                        _loc_df = pd.read_csv(
+                            _full_hub_csv,
+                            usecols=lambda c: c in _usecols,
+                            dtype={"name": "string", "hub_name": "string",
+                                   "latitude": "float32", "longitude": "float32"},
+                        ).dropna(subset=["latitude", "longitude"])
+                        _loc_df["lat_r"] = _loc_df["latitude"].round(3)
+                        _loc_df["lng_r"] = _loc_df["longitude"].round(3)
+                        # Vectorised: group hub names by rounded lat/long
+                        _name_col = "name" if "name" in _loc_df.columns else "hub_name"
+                        _loc_to_names = (
+                            _loc_df.groupby(["lat_r", "lng_r"])[_name_col]
+                            .apply(list).to_dict()
+                        )
+                        _cluster_hub_names = set(_ms_proc["hub_name"].dropna().unique())
+                        for _ch in _cluster_hub_names - _awb_hub_names:
+                            _ch_row = _loc_df[_loc_df[_name_col] == _ch]
+                            if _ch_row.empty:
+                                continue
+                            _lk = (_ch_row.iloc[0]["lat_r"], _ch_row.iloc[0]["lng_r"])
+                            for _candidate in _loc_to_names.get(_lk, []):
+                                if _candidate in _awb_hub_names:
+                                    _hub_name_map[_ch] = _candidate
+                                    break
+
+                    _pin_only_counts = {}
+                    for (_h, _p), _c in _hub_pin_counts.items():
+                        _pin_only_counts[_p] = _pin_only_counts.get(_p, 0) + _c
+
+                    for _t in _ms_proc.itertuples(index=False):
+                        _cc = str(getattr(_t, 'cluster_code', ''))
+                        _hname = str(getattr(_t, 'hub_name', ''))
+                        _pin_raw = getattr(_t, 'pincode', '')
+                        try:
+                            _pin = str(int(float(_pin_raw))) if _pin_raw not in (None, '', 'nan') else ''
+                        except (ValueError, TypeError):
+                            _pin = str(_pin_raw).replace('.0', '').strip()
+                        _rate = float(getattr(_t, 'surge_amount', 0))
+                        _awb_n = _hub_pin_counts.get((_hname, _pin), 0)
+                        if _awb_n == 0 and _hname in _hub_name_map:
+                            _awb_n = _hub_pin_counts.get((_hub_name_map[_hname], _pin), 0)
+                        if _awb_n == 0:
+                            _awb_n = _pin_only_counts.get(_pin, 0)
+                        _cluster_awb_stats[_cc] = {
+                            "awb_count": _awb_n,
+                            "total_cost": round(_awb_n * _rate, 1),
+                            "rate": _rate,
+                        }
 
             # ── Build cluster GeoJSON with AWB stats (vectorized) ──
             # Reduce numeric precision further when the polygon count is huge
