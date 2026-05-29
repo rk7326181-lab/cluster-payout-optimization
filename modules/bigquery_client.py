@@ -857,6 +857,126 @@ def query_awb_for_hub(hub_name: str) -> pd.DataFrame:
     return full_df[full_df["hub"].astype(str) == hub_name].copy()
 
 
+def get_parquet_file_bytes() -> bytes | None:
+    """Return the AWB parquet file as raw bytes for browser download.
+    Returns None if the file doesn't exist."""
+    cache_parquet = _get_awb_cache_path().replace(".csv", ".parquet")
+    if not os.path.exists(cache_parquet):
+        return None
+    with open(cache_parquet, "rb") as f:
+        return f.read()
+
+
+def get_parquet_file_info() -> dict:
+    """Return size, row count and fetch date of the stored AWB parquet."""
+    cache_parquet = _get_awb_cache_path().replace(".csv", ".parquet")
+    info = {"exists": False, "size_mb": 0, "rows": 0, "fetched": "", "hubs": 0}
+    if not os.path.exists(cache_parquet):
+        return info
+    info["exists"] = True
+    info["size_mb"] = round(os.path.getsize(cache_parquet) / 1024 / 1024, 1)
+    # Metadata from JSON
+    meta_path = _get_awb_cache_meta_path()
+    if os.path.exists(meta_path):
+        try:
+            with open(meta_path) as f:
+                meta = json.load(f)
+            info["rows"] = meta.get("record_count", 0)
+            info["fetched"] = meta.get("fetched_time", "")
+        except Exception:
+            pass
+    # Hub count via DuckDB (fast)
+    if HAS_DUCKDB and info.get("rows", 0) == 0:
+        try:
+            con = duckdb.connect()
+            r = con.execute("SELECT COUNT(*), COUNT(DISTINCT hub) FROM read_parquet(?)",
+                            [cache_parquet]).fetchone()
+            con.close()
+            info["rows"] = r[0] or 0
+            info["hubs"] = r[1] or 0
+        except Exception:
+            pass
+    if HAS_DUCKDB and info.get("hubs", 0) == 0 and info["exists"]:
+        try:
+            con = duckdb.connect()
+            r = con.execute("SELECT COUNT(DISTINCT hub) FROM read_parquet(?)",
+                            [cache_parquet]).fetchone()
+            con.close()
+            info["hubs"] = r[0] or 0
+        except Exception:
+            pass
+    return info
+
+
+def restore_awb_from_bytes(data: bytes, progress_cb=None) -> tuple[int, str | None]:
+    """Save uploaded parquet bytes as the AWB cache and rebuild hexbin.
+    Returns (row_count, error_message).  error_message is None on success."""
+    cache_parquet = _get_awb_cache_path().replace(".csv", ".parquet")
+    try:
+        os.makedirs(AWB_CACHE_DIR, exist_ok=True)
+        with open(cache_parquet, "wb") as f:
+            f.write(data)
+    except Exception as e:
+        return 0, f"Could not save parquet: {e}"
+
+    # Validate it's a real parquet
+    try:
+        if HAS_DUCKDB:
+            con = duckdb.connect()
+            row_count = con.execute("SELECT COUNT(*) FROM read_parquet(?)",
+                                    [cache_parquet]).fetchone()[0]
+            con.close()
+        else:
+            import pyarrow.parquet as pq
+            row_count = pq.read_metadata(cache_parquet).num_rows
+    except Exception as e:
+        os.remove(cache_parquet)
+        return 0, f"Invalid parquet file: {e}"
+
+    # Save metadata
+    try:
+        meta = {
+            "fetched_date":  datetime.now().strftime("%Y-%m-%d"),
+            "fetched_time":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "record_count":  row_count,
+            "source":        "uploaded",
+            "columns":       ["order_date","rider_id","hub","pincode","payment_category",
+                               "fwd_del_awb_number","lat","long"],
+        }
+        with open(_get_awb_cache_meta_path(), "w") as f:
+            json.dump(meta, f)
+    except Exception:
+        pass
+
+    # Rebuild hexbin cache
+    if progress_cb:
+        progress_cb(0.7, f"Building hexbin from {row_count:,} rows…")
+    _precompute_hexbin_from_parquet(cache_parquet)
+
+    return row_count, None
+
+
+def list_available_hubs() -> list[str]:
+    """Return sorted list of hub names present in the stored AWB parquet."""
+    cache_parquet = _get_awb_cache_path().replace(".csv", ".parquet")
+    if not os.path.exists(cache_parquet):
+        return []
+    if HAS_DUCKDB:
+        try:
+            con = duckdb.connect()
+            rows = con.execute(
+                "SELECT DISTINCT CAST(hub AS VARCHAR) AS hub FROM read_parquet(?) ORDER BY hub",
+                [cache_parquet]).fetchall()
+            con.close()
+            return [r[0] for r in rows if r[0]]
+        except Exception:
+            pass
+    full = load_awb_from_cache()
+    if full is not None and "hub" in full.columns:
+        return sorted(full["hub"].dropna().unique().tolist())
+    return []
+
+
 def regenerate_hexbin_cache():
     """Re-generate hexbin_cache.json from parquet using DuckDB (reads only needed columns)."""
     cache_parquet = _get_awb_cache_path().replace(".csv", ".parquet")

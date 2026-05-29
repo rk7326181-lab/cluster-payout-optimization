@@ -24,6 +24,8 @@ from bigquery_client import (
     HAS_BQ, fetch_awb_data, load_awb_from_cache, get_awb_cache_info,
     _save_awb_cache, load_hexbin_cache, load_awb_sample_cache,
     get_hub_pincode_counts, get_awb_preview, _get_awb_cache_path,
+    get_parquet_file_bytes, get_parquet_file_info, restore_awb_from_bytes,
+    list_available_hubs, query_awb_for_hub,
     is_cloud_environment as bq_is_cloud_env,
     auto_connect as bq_auto_connect,
 )
@@ -2989,6 +2991,161 @@ with tab4:
                 st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
                 st.caption(f"Preview: first 200 of {_awb_preview['total_rows']:,} records (stored as Parquet for fast loading)")
                 st.dataframe(_awb_preview["preview_df"], use_container_width=True, hide_index=True)
+
+            # ── Save / Restore AWB Parquet ───────────────────────────────────
+            st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+            st.markdown("### 💾 Save & Restore AWB Data")
+            st.caption(
+                "Download the full AWB parquet file to your PC or Google Drive. "
+                "Next time, upload it back to restore instantly — **no BigQuery fetch needed**."
+            )
+
+            _pq_info = get_parquet_file_info()
+            if _pq_info["exists"]:
+                _pi1, _pi2, _pi3 = st.columns(3)
+                _pi1.metric("File Size", f"{_pq_info['size_mb']:.0f} MB")
+                _pi2.metric("Total Rows", f"{_pq_info['rows']:,}")
+                _pi3.metric("Last Fetched", _pq_info.get("fetched", "—")[:10] or "—")
+
+                _pq_bytes = get_parquet_file_bytes()
+                if _pq_bytes:
+                    st.download_button(
+                        "⬇ Download AWB Parquet (save to PC / Google Drive)",
+                        data=_pq_bytes,
+                        file_name="shadowfax_awb_30days.parquet",
+                        mime="application/octet-stream",
+                        use_container_width=True,
+                        help="Save this file to your PC or upload it to Google Drive. "
+                             "Use 'Restore' below to reload without BigQuery.",
+                    )
+            else:
+                st.info("No AWB data stored yet. Fetch from BigQuery above first.")
+
+            st.markdown("**Restore from saved file** (parquet downloaded previously):")
+            _restore_file = st.file_uploader(
+                "Upload shadowfax_awb_*.parquet",
+                type=["parquet"],
+                key="awb_restore_upload",
+                label_visibility="collapsed",
+            )
+            if _restore_file and st.session_state.get("_awb_restore_id") != _restore_file.file_id:
+                _rprog = st.progress(0, "Restoring AWB parquet…")
+                def _restore_cb(p, msg): _rprog.progress(int(p * 100), msg)
+                _r_rows, _r_err = restore_awb_from_bytes(_restore_file.getbuffer().tobytes(), _restore_cb)
+                _rprog.empty()
+                if _r_err:
+                    st.error(f"Restore failed: {_r_err}")
+                else:
+                    st.session_state["_awb_restore_id"] = _restore_file.file_id
+                    # Clear stale session caches
+                    for _k in ("_ms_hex_cache", "_hub_pin_counts_cache",
+                               "_hex_rebuild_attempted", "_ms_payload",
+                               "_pip_awb_stats", "_pip_data_id"):
+                        st.session_state.pop(_k, None)
+                    st.success(f"✅ Restored {_r_rows:,} AWB rows from file. "
+                               "Maps Studio hexbins and hub burn calculations updated.")
+                    st.rerun()
+
+            # ── Hub-Specific AWB Analysis ────────────────────────────────────
+            st.markdown("<div style='height:20px'></div>", unsafe_allow_html=True)
+            st.markdown("### 🏢 Hub-Specific AWB Analysis")
+            st.caption(
+                "Select a hub to instantly load its AWB data from the stored parquet — "
+                "no BigQuery fetch. Shows AWB count, burn, and delivery map for that hub."
+            )
+
+            _avail_hubs = list_available_hubs()
+            if not _avail_hubs:
+                st.info("Fetch AWB data first (button above) to enable hub-specific analysis.")
+            else:
+                _sel_hub = st.selectbox(
+                    "Select hub for analysis",
+                    options=["— choose a hub —"] + _avail_hubs,
+                    key="hub_awb_selector",
+                    label_visibility="collapsed",
+                )
+                if _sel_hub and _sel_hub != "— choose a hub —":
+                    with st.spinner(f"Loading AWB data for {_sel_hub}…"):
+                        _hub_df = query_awb_for_hub(_sel_hub)
+
+                    if _hub_df.empty:
+                        st.warning(f"No AWB records found for hub '{_sel_hub}' in stored data.")
+                    else:
+                        # Basic stats
+                        _h1, _h2, _h3, _h4 = st.columns(4)
+                        _h1.metric("Total AWBs", f"{len(_hub_df):,}")
+                        _h2.metric("Unique Pincodes",
+                                   f"{_hub_df['pincode'].nunique():,}" if "pincode" in _hub_df.columns else "—")
+                        _h3.metric("Unique Riders",
+                                   f"{_hub_df['rider_id'].nunique():,}" if "rider_id" in _hub_df.columns else "—")
+                        if "payment_category" in _hub_df.columns:
+                            _hub_df["_pay_num"] = pd.to_numeric(
+                                _hub_df["payment_category"].astype(str).str.replace("P", "", regex=False),
+                                errors="coerce"
+                            )
+                            _h4.metric("Avg Pincode Pay", f"₹{_hub_df['_pay_num'].mean():.2f}")
+
+                        # P&L estimate using cluster data
+                        _proc_data = st.session_state.get("processed_data")
+                        if _proc_data is not None and "pincode" in _hub_df.columns:
+                            from modules.cluster_burn import ClusterBurnCalculator, PAYMENT_MAPPING, DESCRIPTION_MAPPING
+                            _hub_clusters = _proc_data[
+                                _proc_data.get("hub_name", pd.Series(dtype=str)).astype(str) == _sel_hub
+                            ] if "hub_name" in _proc_data.columns else pd.DataFrame()
+                            if not _hub_clusters.empty:
+                                from shapely.wkt import loads as _wkt_loads
+                                from shapely.prepared import prep as _prep
+                                _clusters_for_hub = []
+                                for _, _cr in _hub_clusters.iterrows():
+                                    _geom = _cr.get("geometry")
+                                    if _geom is None:
+                                        try:
+                                            _geom = _wkt_loads(str(_cr.get("boundary", "")))
+                                        except Exception:
+                                            continue
+                                    if _geom:
+                                        _clusters_for_hub.append({
+                                            "prepared": _prep(_geom), "polygon": _geom,
+                                            "name": str(_cr.get("cluster_code", "")),
+                                            "description": str(_cr.get("description", _cr.get("cluster_category", ""))),
+                                        })
+                                if _clusters_for_hub:
+                                    with st.spinner("Calculating P&L…"):
+                                        _hub_result = ClusterBurnCalculator.assign_clusters(
+                                            _hub_df.rename(columns={"long": "long"} if "long" in _hub_df.columns else {}),
+                                            _clusters_for_hub, {}
+                                        )
+                                        _hub_pnl = ClusterBurnCalculator.calculate_pnl(_hub_result)
+                                    if not _hub_pnl.empty:
+                                        _p1, _p2, _p3 = st.columns(3)
+                                        _p1.metric("Monthly Saving", f"₹{_hub_pnl['Saving'].sum():,.0f}")
+                                        _p2.metric("Monthly Burning", f"₹{_hub_pnl['Burning'].sum():,.0f}")
+                                        _p3.metric("Net P&L", f"₹{_hub_pnl['P & L'].sum():,.0f}")
+                                        st.dataframe(
+                                            ClusterBurnCalculator.build_pivot(_hub_pnl),
+                                            use_container_width=True,
+                                        )
+
+                        # Pincode-level breakdown
+                        if "pincode" in _hub_df.columns and "payment_category" in _hub_df.columns:
+                            _pin_summary = (
+                                _hub_df.groupby("pincode")
+                                .agg(awb_count=("fwd_del_awb_number", "count") if "fwd_del_awb_number" in _hub_df.columns
+                                     else ("pincode", "count"))
+                                .reset_index()
+                                .sort_values("awb_count", ascending=False)
+                            )
+                            with st.expander(f"Pincode breakdown — {len(_pin_summary)} pincodes"):
+                                st.dataframe(_pin_summary, use_container_width=True, hide_index=True, height=280)
+
+                        # Download hub slice
+                        st.download_button(
+                            f"⬇ Download AWB for {_sel_hub} (CSV)",
+                            data=_hub_df.to_csv(index=False).encode("utf-8"),
+                            file_name=f"awb_{_sel_hub.replace('/', '_')}_30d.csv",
+                            mime="text/csv",
+                            use_container_width=True,
+                        )
 
         # ── Serviceability Tab ──
         with ptab4:
