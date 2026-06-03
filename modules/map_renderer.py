@@ -7,10 +7,116 @@ Uses a single batched GeoJSON FeatureCollection for performance (handles 12K+ po
 
 import folium
 from folium import plugins
+from branca.element import MacroElement
+try:
+    from jinja2 import Template as JinjaTemplate
+except ImportError:
+    JinjaTemplate = None
 import pandas as pd
 from shapely import wkt
 from shapely.geometry import mapping
 import json
+
+
+class OsrmRouteDistanceTool(MacroElement):
+    """Interactive road-distance tool — click two or more points on the map to
+    measure the real driving distance via the OSRM public API.
+    Works on polygons, markers, and empty map areas (clicks on any layer).
+    Press ESC to clear. Click the ruler button again to deactivate.
+    """
+    _template = JinjaTemplate("""
+    {% macro script(this, kwargs) %}
+    (function(){
+        var mapObj = {{ this._parent.get_name() }};
+        var RouteDistControl = L.Control.extend({
+            options: { position: 'topleft' },
+            onAdd: function(map) {
+                var container = L.DomUtil.create('div','leaflet-bar leaflet-control');
+                var btn = L.DomUtil.create('a','',container);
+                btn.innerHTML = '&#128207;';
+                btn.title = 'Route Distance Tool  (click points → get road distance, ESC to clear)';
+                btn.href = '#';
+                btn.style.cssText = 'font-size:16px;line-height:30px;text-align:center;display:block;width:30px;height:30px;text-decoration:none;';
+                L.DomEvent.disableClickPropagation(container);
+                var active=false, points=[], layers=[], totalDist=0;
+                function clearAll(){
+                    layers.forEach(function(l){map.removeLayer(l);}); layers=[];
+                    points=[]; totalDist=0; active=false;
+                    btn.style.backgroundColor=''; btn.style.color='';
+                    map.getContainer().style.cursor='';
+                }
+                function showInfo(){
+                    if(points.length<2) return;
+                    var last=points[points.length-1];
+                    var lbl=L.marker(last,{icon:L.divIcon({className:'',
+                        html:'<div style="background:#fff;border:2px solid #008A71;border-radius:5px;padding:4px 10px;font-size:12px;font-weight:700;white-space:nowrap;color:#008A71;box-shadow:0 2px 6px rgba(0,0,0,.2)">&#128739; '+totalDist.toFixed(2)+' km</div>',
+                        iconAnchor:[-8,12]})}).addTo(map);
+                    layers.push(lbl);
+                }
+                btn.onclick=function(e){
+                    L.DomEvent.preventDefault(e);
+                    if(active){clearAll();}else{
+                        active=true;
+                        btn.style.backgroundColor='#008A71'; btn.style.color='#fff';
+                        map.getContainer().style.cursor='crosshair';
+                    }
+                };
+                function addPoint(lat,lng){
+                    if(!active) return;
+                    var pt=[lat,lng]; points.push(pt);
+                    var dot=L.circleMarker(pt,{radius:5,color:'#008A71',fillColor:'#008A71',fillOpacity:1,weight:2}).addTo(map);
+                    layers.push(dot);
+                    if(points.length>1){
+                        var prev=points[points.length-2], curr=pt;
+                        var url='https://router.project-osrm.org/route/v1/driving/'+prev[1]+','+prev[0]+';'+curr[1]+','+curr[0]+'?overview=full&geometries=geojson';
+                        fetch(url,{signal:AbortSignal.timeout(8000)})
+                            .then(function(r){return r.json();})
+                            .then(function(d){
+                                if(d.code==='Ok'&&d.routes&&d.routes.length){
+                                    var coords=d.routes[0].geometry.coordinates.map(function(c){return[c[1],c[0]];});
+                                    totalDist+=d.routes[0].distance/1000;
+                                    layers.push(L.polyline(coords,{color:'#008A71',weight:3,opacity:0.85}).addTo(map));
+                                } else {
+                                    totalDist+=map.distance(L.latLng(prev),L.latLng(curr))/1000;
+                                    layers.push(L.polyline([prev,curr],{color:'#ef4444',weight:2,dashArray:'6',opacity:0.7}).addTo(map));
+                                }
+                                showInfo();
+                            })
+                            .catch(function(){
+                                totalDist+=map.distance(L.latLng(prev),L.latLng(curr))/1000;
+                                layers.push(L.polyline([prev,curr],{color:'#ef4444',weight:2,dashArray:'6',opacity:0.7}).addTo(map));
+                                showInfo();
+                            });
+                    }
+                }
+                window.osrmAddPoint=addPoint;
+                var _osrmLastMs=0;
+                function addPointOnce(lat,lng){
+                    var now=Date.now(); if(now-_osrmLastMs<80) return; _osrmLastMs=now;
+                    addPoint(lat,lng);
+                }
+                function addLayerListener(layer){
+                    if(layer.eachLayer){
+                        layer.eachLayer(addLayerListener);
+                        layer.on('layeradd',function(ev){addLayerListener(ev.layer);});
+                    } else if(layer.on){
+                        layer.on('click',function(e){
+                            if(!active) return;
+                            addPointOnce(e.latlng.lat,e.latlng.lng);
+                        });
+                    }
+                }
+                map.eachLayer(addLayerListener);
+                map.on('layeradd',function(ev){addLayerListener(ev.layer);});
+                map.on('click',function(e){ addPointOnce(e.latlng.lat,e.latlng.lng); });
+                document.addEventListener('keydown',function(e){if(e.key==='Escape')clearAll();});
+                return container;
+            }
+        });
+        new RouteDistControl().addTo(mapObj);
+    })();
+    {% endmacro %}
+    """) if JinjaTemplate else None
 
 
 class MapRenderer:
@@ -221,7 +327,8 @@ class MapRenderer:
         # ── Rate labels — ONLY for small datasets (single hub view) ──
         # Each label = 1 DOM element. 12K labels = browser crash.
         # Hard cap at 300 clusters to keep the page responsive.
-        if show_rate_labels and total_clusters <= 300:
+        rate_label_fg = folium.FeatureGroup(name="Rate Labels", show=show_rate_labels)
+        if total_clusters <= 300:
             for idx, row in cluster_df.iterrows():
                 if pd.notna(row.get('center_lat')) and pd.notna(row.get('center_lon')) and pd.notna(row.get('geometry')):
                     surge_amount = row.get('surge_amount', 0)
@@ -250,11 +357,13 @@ class MapRenderer:
                                 transform: translate(-50%, -50%);
                             '>{rate_text}</div>
                         """)
-                    ).add_to(m)
+                    ).add_to(rate_label_fg)
+        rate_label_fg.add_to(m)
 
-        # ── Hub markers ──
-        # Skip hubs without coordinates — the raw hub_data may now contain
+        # -- Hub markers -- grouped for clean LayerControl --
+        # Skip hubs without coordinates - the raw hub_data may now contain
         # rows with NaN lat/long (BigQuery fetch keeps all rows).
+        hub_fg = folium.FeatureGroup(name="Hub Markers", show=show_hub_markers)
         if show_hub_markers:
             relevant_hubs = hub_df[
                 hub_df['id'].isin(cluster_df['hub_id'].unique())
@@ -262,17 +371,21 @@ class MapRenderer:
                 & hub_df['longitude'].notna()
             ]
             for idx, hub in relevant_hubs.iterrows():
-                self._add_hub_marker(m, hub)
+                self._add_hub_marker(hub_fg, hub)
+        hub_fg.add_to(m)
 
-        # ── Legend ──
+        # -- Legend --
         self._add_legend(m, pincode_color_map)
 
-        # Fullscreen button
+        # -- Map controls --
         plugins.Fullscreen(position='topright').add_to(m)
+        folium.LayerControl(position='topright', collapsed=True).add_to(m)
+        if OsrmRouteDistanceTool._template is not None:
+            OsrmRouteDistanceTool().add_to(m)
 
         return m
 
-    def _add_hub_marker(self, map_obj, hub_row):
+    def _add_hub_marker(self, map_obj_or_fg, hub_row):
         """Add a hub location marker to the map"""
         try:
             # Home-style hub marker (Precision Navigator green)
@@ -329,55 +442,51 @@ class MapRenderer:
                 popup=folium.Popup(popup_html, max_width=260),
                 tooltip=f"Hub: {hub_row['name']}",
                 icon=folium.DivIcon(html=f'<div style="margin-left: -15px; margin-top: -15px;">{icon_html}</div>')
-            ).add_to(map_obj)
+            ).add_to(map_obj_or_fg)
 
         except Exception as e:
             print(f"Warning: Could not add hub marker for {hub_row.get('name', 'unknown')}: {e}")
 
     def _add_legend(self, map_obj, pincode_color_map=None):
-        """Add color legend to the map"""
+        """Add collapsible color legend to the map"""
+        hub_entry = '''
+                <div style="margin-top:8px;padding-top:8px;border-top:1px solid #e5e7eb;">
+                    <div style="display:flex;align-items:center;">
+                        <svg width="22" height="16" viewBox="0 0 32 38" style="margin-right:6px;">
+                            <path d="M16 0C7.2 0 0 7.2 0 16c0 11 16 22 16 22s16-11 16-22C32 7.2 24.8 0 16 0z" fill="#008A71" stroke="#005141" stroke-width="1.5"/>
+                            <path d="M16 8L8 15v8h5v-5h6v5h5v-8L16 8z" fill="white" opacity="0.95"/>
+                        </svg>
+                        <span style="font-weight:500;font-size:11px;">Hub Location</span>
+                    </div>
+                </div>'''
+
         if pincode_color_map and self._current_color_mode == 'pincode':
             # Build dynamic pincode legend
             pincode_items = ''
             for pin in sorted(pincode_color_map.keys()):
                 color = pincode_color_map[pin]
                 pincode_items += f'''
-                <div style="display: flex; align-items: center;">
-                    <div style="width: 20px; height: 14px; background-color: {color}; opacity: 0.7; margin-right: 6px; border: 1px solid #9CA3AF; border-radius: 2px;"></div>
-                    <span style="font-size: 11px;">{pin}</span>
+                <div style="display:flex;align-items:center;">
+                    <div style="width:20px;height:14px;background-color:{color};opacity:0.7;margin-right:6px;border:1px solid #9CA3AF;border-radius:2px;"></div>
+                    <span style="font-size:11px;">{pin}</span>
                 </div>'''
 
             legend_html = f'''
-            <div style="
-                position: fixed;
-                bottom: 50px;
-                right: 50px;
-                width: 200px;
-                max-height: 500px;
-                overflow-y: auto;
-                background-color: white;
-                border: 2px solid #d1d5db;
-                border-radius: 8px;
-                padding: 12px;
-                font-family: Arial, sans-serif;
-                font-size: 12px;
-                z-index: 9999;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            ">
-                <h4 style="margin: 0 0 8px 0; font-size: 13px; color: #1f2937; border-bottom: 2px solid #8B5CF6; padding-bottom: 5px;">
-                    Pincode Legend
-                </h4>
-                <p style="margin: 0 0 8px 0; font-size: 10px; color: #6B7280;">Rate info in labels &amp; popups</p>
-                <div style="display: flex; flex-direction: column; gap: 4px;">
-                    {pincode_items}
+            <div style="position:fixed;bottom:50px;right:50px;width:200px;
+                background-color:white;border:2px solid #d1d5db;border-radius:8px;
+                padding:10px 12px;font-family:Arial,sans-serif;font-size:12px;
+                z-index:9999;box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+                    <span style="font-size:13px;font-weight:700;color:#1f2937;border-bottom:2px solid #8B5CF6;padding-bottom:3px;flex:1">Pincode Legend</span>
+                    <button onclick="var b=document.getElementById('_cpo_pin_body');var v=b.style.display!=='none';b.style.display=v?'none':'block';this.textContent=v?'+':'−'"
+                        style="background:none;border:1px solid #9ca3af;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:13px;font-weight:700;color:#6b7280;margin-left:6px;line-height:1.3">−</button>
                 </div>
-                <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5e7eb;">
-                    <div style="display: flex; align-items: center;">
-                        <svg width="20" height="16" viewBox="0 0 30 30" style="margin-right: 6px;">
-                            <polygon points="15,5 25,25 5,25" fill="#EF4444" stroke="#991B1B" stroke-width="2"/>
-                        </svg>
-                        <span style="font-weight: 500; font-size: 11px;">Hub Location</span>
+                <div id="_cpo_pin_body" style="max-height:300px;overflow-y:auto">
+                    <p style="margin:0 0 6px 0;font-size:10px;color:#6B7280;">Rate info in labels &amp; popups</p>
+                    <div style="display:flex;flex-direction:column;gap:4px;">
+                        {pincode_items}
                     </div>
+                    {hub_entry}
                 </div>
             </div>
             '''
@@ -387,41 +496,26 @@ class MapRenderer:
             for rate, color in sorted(self.RATE_COLORS.items()):
                 label = f"&#8377;{rate:g}"
                 rate_items += f'''
-                    <div style="display: flex; align-items: center;">
-                        <div style="width: 22px; height: 13px; background-color: {color}; margin-right: 6px; border: 1px solid #9CA3AF; border-radius: 2px;"></div>
-                        <span style="font-size: 11px;">{label}</span>
+                    <div style="display:flex;align-items:center;">
+                        <div style="width:22px;height:13px;background-color:{color};margin-right:6px;border:1px solid #9CA3AF;border-radius:2px;"></div>
+                        <span style="font-size:11px;">{label}</span>
                     </div>'''
 
             legend_html = f'''
-            <div style="
-                position: fixed;
-                bottom: 50px;
-                right: 50px;
-                width: 180px;
-                max-height: 550px;
-                overflow-y: auto;
-                background-color: white;
-                border: 2px solid #d1d5db;
-                border-radius: 8px;
-                padding: 12px;
-                font-family: Arial, sans-serif;
-                font-size: 12px;
-                z-index: 9999;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            ">
-                <h4 style="margin: 0 0 8px 0; font-size: 13px; color: #1f2937; border-bottom: 2px solid #3b82f6; padding-bottom: 5px;">
-                    Surge Rate Legend
-                </h4>
-                <div style="display: flex; flex-direction: column; gap: 4px;">
-                    {rate_items}
+            <div style="position:fixed;bottom:50px;right:50px;width:180px;
+                background-color:white;border:2px solid #d1d5db;border-radius:8px;
+                padding:10px 12px;font-family:Arial,sans-serif;font-size:12px;
+                z-index:9999;box-shadow:0 4px 6px rgba(0,0,0,0.1);">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:5px">
+                    <span style="font-size:13px;font-weight:700;color:#1f2937;border-bottom:2px solid #3b82f6;padding-bottom:3px;flex:1">Surge Rate Legend</span>
+                    <button onclick="var b=document.getElementById('_surge_rate_body');var v=b.style.display!=='none';b.style.display=v?'none':'block';this.textContent=v?'+':'−'"
+                        style="background:none;border:1px solid #9ca3af;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:13px;font-weight:700;color:#6b7280;margin-left:6px;line-height:1.3">−</button>
                 </div>
-                <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #e5e7eb;">
-                    <div style="display: flex; align-items: center;">
-                        <svg width="22" height="16" viewBox="0 0 30 30" style="margin-right: 6px;">
-                            <polygon points="15,5 25,25 5,25" fill="#EF4444" stroke="#991B1B" stroke-width="2"/>
-                        </svg>
-                        <span style="font-weight: 500; font-size: 11px;">Hub Location</span>
+                <div id="_surge_rate_body" style="max-height:400px;overflow-y:auto">
+                    <div style="display:flex;flex-direction:column;gap:4px;">
+                        {rate_items}
                     </div>
+                    {hub_entry}
                 </div>
             </div>
             '''
@@ -465,14 +559,25 @@ class MapRenderer:
                     popup=folium.Popup(popup_html, max_width=320)
                 ).add_to(m)
 
-                if show_rate_labels and pd.notna(row.get('center_lat')):
-                    folium.Marker(
-                        [row['center_lat'], row['center_lon']],
-                        icon=folium.DivIcon(html=f'<div style="font-weight:bold;color:#1f2937;">\u20b9{row["cpo"]:.2f}</div>')
-                    ).add_to(m)
+        # FeatureGroups for clean LayerControl
+        cpo_label_fg = folium.FeatureGroup(name="CPO Labels", show=show_rate_labels)
+        for idx, row in cluster_df.iterrows():
+            if pd.notna(row.get('geometry')) and pd.notna(row.get('cpo')) and pd.notna(row.get('center_lat')):
+                folium.Marker(
+                    [row['center_lat'], row['center_lon']],
+                    icon=folium.DivIcon(html=f'<div style="font-size:11px;font-weight:bold;background:rgba(255,255,255,0.85);padding:2px 5px;border-radius:3px;border:1px solid #6B7280;white-space:nowrap;color:#1f2937;">\u20b9{row["cpo"]:.2f}</div>')
+                ).add_to(cpo_label_fg)
+        cpo_label_fg.add_to(m)
 
+        hub_fg = folium.FeatureGroup(name="Hub Markers", show=show_hub_markers)
         if show_hub_markers:
             for idx, hub in hub_df.iterrows():
-                self._add_hub_marker(m, hub)
+                self._add_hub_marker(hub_fg, hub)
+        hub_fg.add_to(m)
+
+        plugins.Fullscreen(position='topright').add_to(m)
+        folium.LayerControl(position='topright', collapsed=True).add_to(m)
+        if OsrmRouteDistanceTool._template is not None:
+            OsrmRouteDistanceTool().add_to(m)
 
         return m
