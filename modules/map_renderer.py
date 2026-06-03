@@ -7,6 +7,7 @@ Uses a single batched GeoJSON FeatureCollection for performance (handles 12K+ po
 
 import folium
 from folium import plugins
+from folium.plugins import MeasureControl
 from branca.element import MacroElement
 try:
     from jinja2 import Template as JinjaTemplate
@@ -379,7 +380,15 @@ class MapRenderer:
 
         # -- Map controls --
         plugins.Fullscreen(position='topright').add_to(m)
+        # Haversine straight-line distance (ruler icon, top-left)
+        MeasureControl(
+            position='topleft',
+            primary_length_unit='kilometers',
+            secondary_length_unit='meters',
+            primary_area_unit='sqkilometers',
+        ).add_to(m)
         folium.LayerControl(position='topright', collapsed=True).add_to(m)
+        # OSRM road-distance ruler (click any point on map/polygon/marker)
         if OsrmRouteDistanceTool._template is not None:
             OsrmRouteDistanceTool().add_to(m)
 
@@ -576,6 +585,12 @@ class MapRenderer:
         hub_fg.add_to(m)
 
         plugins.Fullscreen(position='topright').add_to(m)
+        MeasureControl(
+            position='topleft',
+            primary_length_unit='kilometers',
+            secondary_length_unit='meters',
+            primary_area_unit='sqkilometers',
+        ).add_to(m)
         folium.LayerControl(position='topright', collapsed=True).add_to(m)
         if OsrmRouteDistanceTool._template is not None:
             OsrmRouteDistanceTool().add_to(m)
