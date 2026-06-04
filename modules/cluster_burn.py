@@ -201,7 +201,14 @@ class ClusterBurnCalculator:
         pincode_map: dict,
     ) -> pd.DataFrame:
         """Vectorised point-in-polygon using geopandas sjoin (Shapely 2 + GEOS).
-        Replaces the old itertuples loop which timed out on large datasets."""
+
+        Hub-scoped: each AWB is only matched against polygons that belong to
+        its own hub.  The hub of a polygon is derived from the pincode prefix
+        in its name (e.g. '277209_B' → pin 277209 → hub from AWB data).
+        Cross-hub polygon leakage — where a neighbouring hub's polygon
+        physically overlaps a delivery point — is blocked before accepting a
+        match, fixing inflated burn from overlapping polygon boundaries.
+        """
         import numpy as np
         import geopandas as gpd
 
@@ -213,32 +220,66 @@ class ClusterBurnCalculator:
             ])
 
         n = len(awb_df)
-        lats = pd.to_numeric(awb_df["lat"], errors="coerce").to_numpy()
-        lons = pd.to_numeric(awb_df["long"], errors="coerce").to_numpy()
+        lats     = pd.to_numeric(awb_df["lat"],  errors="coerce").to_numpy()
+        lons     = pd.to_numeric(awb_df["long"], errors="coerce").to_numpy()
         pincodes = awb_df["pincode"].to_numpy()
+        hubs     = awb_df["hub"].to_numpy()
 
         cluster_name_col = np.full(n, None, dtype=object)
         description_col  = np.full(n, None, dtype=object)
 
         if clusters:
-            valid = ~(np.isnan(lats) | np.isnan(lons))
+            valid     = ~(np.isnan(lats) | np.isnan(lons))
             valid_idx = np.where(valid)[0]
 
             if len(valid_idx):
+                # Build pin→hub from AWB data (most frequent hub per pincode)
+                pin2hub = (
+                    awb_df.dropna(subset=["hub"])
+                    .groupby("pincode")["hub"]
+                    .agg(lambda s: s.mode().iloc[0])
+                    .to_dict()
+                )
+
+                def _poly_hub(name):
+                    """Map cluster name prefix to a hub, e.g. '277209_B' → hub of pin 277209."""
+                    parts = str(name).split("_")
+                    if parts and parts[0].isdigit():
+                        return pin2hub.get(int(parts[0]))
+                    return None
+
                 pts_gdf = gpd.GeoDataFrame(
-                    {"_orig_i": valid_idx},
+                    {"_orig_i": valid_idx, "awb_hub": hubs[valid_idx]},
                     geometry=gpd.points_from_xy(lons[valid_idx], lats[valid_idx]),
                     crs="EPSG:4326",
                 )
                 polys_gdf = gpd.GeoDataFrame(
                     {
-                        "cluster_name": [c["name"] for c in clusters],
+                        "cluster_name": [c["name"]        for c in clusters],
                         "description":  [c["description"] for c in clusters],
+                        "poly_hub":     [_poly_hub(c["name"]) for c in clusters],
                     },
                     geometry=[c["polygon"] for c in clusters],
                     crs="EPSG:4326",
                 )
+
                 joined = gpd.sjoin(pts_gdf, polys_gdf, how="left", predicate="within")
+
+                # Drop cross-hub matches BEFORE dedup so that a same-hub polygon
+                # isn't shadowed by an earlier cross-hub match in the CSV order.
+                # Keep a row when: no polygon matched (NaN), the AWB hub is
+                # unknown (can't filter), or both hubs agree.
+                # A polygon whose pincode is absent from the AWB batch gets
+                # poly_hub=None; we reject it (not keep) because we cannot
+                # confirm it belongs to this AWB's hub, which is the safe
+                # choice — the AWB falls back to pincode pay instead of being
+                # billed at an unknown neighbouring hub's rate.
+                keep = (
+                    joined["cluster_name"].isna()
+                    | joined["awb_hub"].isna()
+                    | (joined["awb_hub"] == joined["poly_hub"])
+                )
+                joined = joined[keep]
                 joined = joined.drop_duplicates(subset=["_orig_i"])
                 matched = joined[joined["cluster_name"].notna()]
                 if not matched.empty:
