@@ -142,6 +142,29 @@ html,body{height:100%;font-family:var(--font);background:var(--bg);color:var(--t
 .leaflet-control-zoom{display:none}
 .leaflet-control-attribution{background:rgba(13,17,23,.75)!important;color:var(--muted)!important;font-size:9px!important}
 .leaflet-control-attribution a{color:var(--accent)!important}
+/* ── Smaller, less-obtrusive vertex editing handles ── */
+.leaflet-editing-icon{
+  width:6px!important;height:6px!important;
+  margin-left:-3px!important;margin-top:-3px!important;
+  border-radius:50%!important;
+  background:#4f8ef7!important;
+  border:1.5px solid rgba(255,255,255,0.9)!important;
+  opacity:0.85!important;
+  box-shadow:0 1px 4px rgba(0,0,0,0.5)!important;
+}
+/* Mid-edge "add vertex" ghost handles — even smaller and more transparent */
+.leaflet-editing-icon.new-vertex{
+  width:5px!important;height:5px!important;
+  margin-left:-2.5px!important;margin-top:-2.5px!important;
+  background:#94a3b8!important;
+  opacity:0.35!important;
+  border-color:rgba(255,255,255,0.5)!important;
+}
+/* Touch/mobile handles (bigger tap target, but still tighter than default) */
+.leaflet-touch-icon.leaflet-editing-icon{
+  width:10px!important;height:10px!important;
+  margin-left:-5px!important;margin-top:-5px!important;
+}
 .leaflet-routing-container{display:none!important}
 .leaflet-draw-toolbar a{background-color:var(--surface)!important;border-color:var(--border2)!important;color:var(--text)!important}
 .leaflet-draw-toolbar a:hover{background-color:var(--surface2)!important}
