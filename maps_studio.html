@@ -1030,9 +1030,12 @@ function loadHubData(){
     precomputedHex.forEach(cell=>{
       const lat=parseFloat(cell.lat),lng=parseFloat(cell.lng);
       if(isNaN(lat)||isNaN(lng))return;
-      // Try exact lowercase match first, then normalized match
+      // Try: exact lowercase name → normalized name → direct hub_id key → pincode fallback
       const hubKey=cell.hub||'';
-      let hid=_hubNameToId[hubKey.toLowerCase()]||_hubNameToId[_normHub(hubKey)];
+      let hid=_hubNameToId[hubKey.toLowerCase()]
+           ||_hubNameToId[_normHub(hubKey)]
+           ||(hubRegistry[hubKey]?hubKey:null)
+           ||(hubRegistry[hubKey.toLowerCase()]?hubKey.toLowerCase():null);
       if(!hid&&cell.pincode){
         hid=_pincodeToHubId[_pinNorm(cell.pincode)];
         if(hid)_hexFallback++;
@@ -1044,13 +1047,10 @@ function loadHubData(){
     });
     console.log('[HexViz] Indexed',_hexMatched,'/',precomputedHex.length,'hex cells for',Object.keys(_hexCellsByHub).length,'hubs | name-match:',(_hexMatched-_hexFallback),' pin-fallback:',_hexFallback,' unmatched:',_hexUnmatched);
     if(_hexUnmatched>0&&_hexMatched===0){
-      console.warn('[HexViz] 0 hex cells matched — hub names in AWB data may differ from cluster hub names. Sample AWB hub:',precomputedHex[0]?.hub,' | Sample cluster hub:',Object.values(hubRegistry)[0]?.name);
+      console.warn('[HexViz] 0 hex cells matched — hub names in AWB data may differ from cluster hub names. Sample AWB hub:',precomputedHex[0]?.hub,' | Sample cluster hub:',Object.values(hubRegistry)[0]?.name,'| Sample hub_id:',Object.keys(hubRegistry)[0]);
     }
-    // Auto-enable AWB hexbin layer when real data is present
-    // so the user sees hexagons immediately without a manual button click.
-    if(_hexMatched>0&&!awbVisible){
-      setTimeout(()=>toggleAWBLayer(),400);
-    }
+    // NOTE: auto-enable is handled by the auto-load block below — do NOT schedule
+    // a second toggleAWBLayer here or it creates a double-toggle that turns hexagons OFF.
   } else if(awbData&&awbData.length){
     // Fallback: compute hexbins from raw AWB sample points
     const hubAwbPts={};
@@ -1058,7 +1058,9 @@ function loadHubData(){
       const lat=parseFloat(a.lat),lng=parseFloat(a.lng);
       if(isNaN(lat)||isNaN(lng)||lat===0||lng===0)return;
       const hubKey=a.hub||'';
-      let hid=_hubNameToId[hubKey.toLowerCase()]||_hubNameToId[_normHub(hubKey)];
+      let hid=_hubNameToId[hubKey.toLowerCase()]
+           ||_hubNameToId[_normHub(hubKey)]
+           ||(hubRegistry[hubKey]?hubKey:null);
       if(!hid&&a.pincode){hid=_pincodeToHubId[_pinNorm(a.pincode)];}
       if(!hid)return;
       if(!hubAwbPts[hid])hubAwbPts[hid]=[];
@@ -1068,10 +1070,7 @@ function loadHubData(){
       _hexCellsByHub[hid]=hexBinPoints(pts,HEX_SIZE);
     });
     console.log('[HexViz] Computed hexbins from',awbData.length,'raw AWB points for',Object.keys(_hexCellsByHub).length,'hubs');
-    // Auto-enable for sample-based hexbins too
-    if(Object.keys(_hexCellsByHub).length>0&&!awbVisible){
-      setTimeout(()=>toggleAWBLayer(),400);
-    }
+    // NOTE: auto-enable handled by auto-load block — no setTimeout here to avoid double-toggle.
   }
 
   // Render hexbins for a specific hub (called from focusHub)
@@ -1084,7 +1083,7 @@ function loadHubData(){
     if(!cells||cells.length===0)return;
     const hInfo=hubRegistry[hid];
     if(!hInfo)return;
-    const maxCount=Math.max(...cells.map(c=>c.count),1);
+    const maxCount=cells.reduce((m,c)=>c.count>m?c.count:m,1);
     let totalAwb=0;
     cells.forEach(cell=>{
       totalAwb+=cell.count;
@@ -1141,6 +1140,7 @@ function loadHubData(){
 
   // ── Polygon cost labels (zoom-dependent) ──
   const labelLayer=L.layerGroup();
+  window._labelLayer=labelLayer; // expose for updatePolygonLabel new-polygon creation
   const labelMinZoom=9;
   window._labelByCode={}; // cluster_code → label marker (for live updates)
   clusterGJ.features.forEach(f=>{
@@ -1352,19 +1352,36 @@ function toggleAWBLayer(){
   const awbBtn=document.getElementById('awbToggleBtn');
   if(awbBtn)awbBtn.style.background=awbVisible?'rgba(52,211,153,.2)':'';
 
-  // When turning AWB on, render hexbins for ALL visible hubs immediately
-  // (not just the focused hub) so the user sees data right away.
-  if(awbVisible&&typeof window.renderHubHexbins==='function'){
-    Object.keys(hubRegistry).forEach(hid=>{
-      if(hubRegistry[hid]&&hubRegistry[hid].visible) window.renderHubHexbins(hid);
+  if(awbVisible){
+    // Render hexbins for ALL visible hubs when turning AWB on
+    if(typeof window.renderHubHexbins==='function'){
+      Object.keys(hubRegistry).forEach(hid=>{
+        if(hubRegistry[hid]&&hubRegistry[hid].visible) window.renderHubHexbins(hid);
+      });
+    }
+    // Add all visible hub AWB layers to map
+    Object.keys(awbLayerGroups).forEach(hid=>{
+      const h=hubRegistry[hid];
+      if(h&&h.visible)map.addLayer(awbLayerGroups[hid]);
     });
+    // Show status: how many hexagons were rendered
+    const hexByHub=window._hexCellsByHub||{};
+    const totalCells=Object.values(hexByHub).reduce((s,arr)=>s+(arr?arr.length:0),0);
+    const layerD=document.getElementById('layerD');
+    if(layerD){
+      if(totalCells>0){
+        layerD.textContent='AWB: '+totalCells+' hexcells across '+Object.keys(hexByHub).length+' hubs';
+      } else {
+        layerD.textContent='AWB: No hexbin data matched hubs — check browser console (F12)';
+        layerD.style.color='#fbbf24';
+      }
+    }
+  } else {
+    // Remove all AWB layers from map
+    Object.keys(awbLayerGroups).forEach(hid=>map.removeLayer(awbLayerGroups[hid]));
+    const layerD=document.getElementById('layerD');
+    if(layerD){layerD.textContent='Layer:Default';layerD.style.color='';}
   }
-
-  Object.keys(awbLayerGroups).forEach(hid=>{
-    const h=hubRegistry[hid];
-    if(awbVisible&&h&&h.visible)map.addLayer(awbLayerGroups[hid]);
-    else map.removeLayer(awbLayerGroups[hid]);
-  });
 
   // Update AWB hexbin legend content (only show if legend toggle is active)
   if(legendVisible){
@@ -2313,8 +2330,6 @@ function updatePolygonLabel(layer){
   const p=layer._featureProps||{};
   const code=p.cluster_code;
   if(!code||!window._labelByCode)return;
-  const marker=window._labelByCode[code];
-  if(!marker)return;
   const awbN=p.awb_count||0;
   const cost=p.total_cost||0;
   const rateNum=p.rate_num||0;
@@ -2324,6 +2339,18 @@ function updatePolygonLabel(layer){
     html:`<div class="poly-label${zeroClass}"><div class="pl-cost">${costStr}</div><div class="pl-rate">\u20B9${rateNum} &middot; ${awbN.toLocaleString()} AWB</div><div class="pl-code">${code} &middot; ${p.pincode||''}</div></div>`,
     className:'',iconSize:[0,0],iconAnchor:[0,0]
   });
+  let marker=window._labelByCode[code];
+  if(!marker){
+    // New or renamed polygon \u2014 create a label marker and register it
+    if(!layer.getBounds)return;
+    try{
+      const c=layer.getBounds().getCenter();
+      marker=L.marker([c.lat,c.lng],{icon:newIcon,interactive:false,zIndexOffset:-100});
+      if(window._labelLayer)window._labelLayer.addLayer(marker);else marker.addTo(map);
+      window._labelByCode[code]=marker;
+    }catch(e){return;}
+    return;
+  }
   marker.setIcon(newIcon);
 }
 
@@ -2695,6 +2722,7 @@ function openPolyEditPopup(layer,hubData){
       }
       updateHubRegistryCosts();
       refreshOptimizerIfOpen();
+      updatePolygonLabel(layer);
       map.closePopup(popup);
     };
     if(cancelBtn)cancelBtn.onclick=()=>map.closePopup(popup);
