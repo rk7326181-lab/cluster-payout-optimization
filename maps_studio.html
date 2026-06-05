@@ -838,7 +838,7 @@ document.getElementById('colBtn').addEventListener('click',()=>{const sb=documen
 const HUB_COLORS=['#4f8ef7','#34d399','#f87171','#fbbf24','#f472b6','#7c6af7','#fb923c','#22d3ee','#a78bfa','#e879f9','#38bdf8','#facc15','#4ade80','#f97316','#06b6d4','#8b5cf6','#ec4899','#14b8a6','#ef4444','#84cc16','#6366f1','#d946ef','#0ea5e9','#f59e0b','#10b981','#e11d48','#7c3aed','#0891b2','#dc2626','#65a30d'];
 // Pastel colors for differentiating pincodes within a hub (30 distinct light colors)
 const PINCODE_COLORS=['#FFB3BA','#BAFFC9','#BAE1FF','#FFFFBA','#E8BAFF','#FFB3E6','#B3FFD9','#B3D9FF','#FFE6B3','#D4BAFF','#BAFFD4','#FFD4BA','#BAF2FF','#FFB3CC','#C9FFB3','#B3FFEE','#FFCCB3','#CCB3FF','#B3FFC9','#FFE0CC','#CCE0FF','#E0FFD1','#FFD1E0','#D1FFE0','#E0D1FF','#FFE8D1','#D1F0FF','#F0FFD1','#FFD1F0','#FFDFBA'];
-let hubRegistry={},hubLayerGroups={},awbLayerGroups={},awbVisible=false,hubEditMode=null,hubEditOriginal=null;
+let hubRegistry={},hubLayerGroups={},awbLayerGroups={},awbVisible=false,hubEditMode=null,hubEditOriginal=null,_hubEditDeleted=[];
 
 // ── Hexbin utility functions ──
 function hexBinPoints(pts,cellSize){
@@ -2031,6 +2031,7 @@ function enterHubEditMode(hubId){
 
   // Snapshot current AWB counts per polygon using HEXBIN data (real counts)
   beforeEditSnapshot=[];
+  _hubEditDeleted=[];
   const hlg1=hubLayerGroups[hubId];
   const _snapHex=_getHubHexCells(hubId);
   if(hlg1&&hlg1.geoJsonLayer){
@@ -2095,6 +2096,10 @@ function saveHubEdit(){
       if(layer.editing)layer.editing.disable();
     });
   }
+  // Also disable editing on any layers deleted during this session so
+  // Leaflet.Draw does not try to restore them after mode exits
+  _hubEditDeleted.forEach(l=>{try{if(l.editing)l.editing.disable();}catch(e){}});
+  _hubEditDeleted=[];
   document.getElementById('editModeBar').classList.remove('show');
   // Clean up live edit panel (keep AWB counts as-is — they reflect the edited state)
   _cleanupLiveEdit();
@@ -2308,6 +2313,9 @@ function cancelHubEdit(){
       if(layer.editing)try{layer.editing.disable();}catch(e){}
     });
   }
+  // Disable editing on layers deleted during this session
+  _hubEditDeleted.forEach(l=>{try{if(l.editing)l.editing.disable();}catch(e){}});
+  _hubEditDeleted=[];
   document.getElementById('editModeBar').classList.remove('show');
   // Revert AWB counts to pre-edit values, then clean up
   _revertLiveEditCounts();
@@ -2737,10 +2745,31 @@ function openPolyEditPopup(layer,hubData){
     if(delBtn)delBtn.onclick=()=>{
       if(!confirm('Delete this polygon?'))return;
       map.closePopup(popup);
+      // Disable Leaflet.Draw editing FIRST — prevents the plugin from
+      // restoring the layer when hub edit mode exits and eachLayer runs
+      if(layer.editing)try{layer.editing.disable();}catch(e){}
       const hid=layer._hubId;
       if(hid&&hubLayerGroups[hid]&&hubLayerGroups[hid].geoJsonLayer){
         hubLayerGroups[hid].geoJsonLayer.removeLayer(layer);
       }
+      // Belt-and-suspenders: ensure the layer is off the map regardless of
+      // which layer group it lives in (editing plugin, feature group, etc.)
+      try{map.removeLayer(layer);}catch(e){}
+      // Track for saveHubEdit/cancelHubEdit so editing.disable() is still called
+      _hubEditDeleted.push(layer);
+      // Remove the rate label marker so it doesn't float over a ghost polygon
+      const _dc=(layer._featureProps||{}).cluster_code;
+      if(_dc&&window._labelByCode&&window._labelByCode[_dc]){
+        try{if(window._labelLayer)window._labelLayer.removeLayer(window._labelByCode[_dc]);
+            else map.removeLayer(window._labelByCode[_dc]);}catch(e){}
+        delete window._labelByCode[_dc];
+      }
+      // Keep hub registry count accurate
+      if(hid&&hubRegistry[hid]){
+        hubRegistry[hid].clusterCount=Math.max(0,(hubRegistry[hid].clusterCount||1)-1);
+        updateHubRegistryCosts();
+      }
+      renderHubList();
     };
   },50);
 }
