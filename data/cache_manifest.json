@@ -1,7 +1,7 @@
 {
-  "cluster_csv": "data/clustering_live_30062026.csv",
-  "hub_csv": "data/hub_Lat_Long30062026.csv",
-  "kepler_csv": "data/kepler_gl_final_main_30062026_csv.csv",
-  "fetched_date": "2026-06-30",
-  "fetched_time": "2026-06-30 10:12:56"
+  "cluster_csv": "data/clustering_live_07072026.csv",
+  "hub_csv": "data/hub_Lat_Long07072026.csv",
+  "kepler_csv": "data/kepler_gl_final_main_07072026_csv.csv",
+  "fetched_date": "2026-07-07",
+  "fetched_time": "2026-07-07 05:52:14"
 }
