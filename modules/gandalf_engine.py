@@ -10,6 +10,11 @@ import numpy as np
 import pandas as pd
 from datetime import datetime
 
+from modules.hub_anomaly import (
+    detect_hub_centroid_anomalies,
+    summarise_centroid_anomalies,
+)
+
 
 class GandalfEngine:
     """Core GANDALF analytics brain. Analyzes clusters, hubs, costs, anomalies."""
@@ -19,13 +24,15 @@ class GandalfEngine:
     FULL_NAME = "Guided Analytics Network for Delivery And Logistics Facilitation"
 
     def __init__(self, cluster_df=None, hub_df=None, processed_df=None,
-                 cpo_analytics=None, awb_counts=None, polygon_optimizer=None):
+                 cpo_analytics=None, awb_counts=None, polygon_optimizer=None,
+                 kepler_df=None):
         self.cluster_df = cluster_df
         self.hub_df = hub_df
         self.processed_df = processed_df
         self.cpo_analytics = cpo_analytics
         self.awb_counts = awb_counts or {}
         self.polygon_optimizer = polygon_optimizer
+        self.kepler_df = kepler_df   # kepler_gl CSV DataFrame for geospatial checks
         self._cache = {}
 
     def update_data(self, **kwargs):
@@ -163,6 +170,55 @@ class GandalfEngine:
 
         self._cache["anomalies"] = anomalies
         return anomalies
+
+    # ──────────────────────────────────────────────
+    #  GEOSPATIAL HUB-CENTROID ANOMALY DETECTION
+    # ──────────────────────────────────────────────
+
+    def detect_geospatial_anomalies(self, kepler_df=None) -> dict:
+        """
+        Run G.A.N.D.A.L.F. hub-centroid anomaly detection on a kepler_gl
+        CSV DataFrame.
+
+        Checks whether each hub is geometrically centred within its
+        service-area polygons (Haversine distance, Rs.0 polygon containment,
+        directional asymmetry, ring monotonicity).
+
+        Parameters
+        ----------
+        kepler_df : pd.DataFrame, optional
+            kepler_gl CSV data.  Falls back to self.kepler_df if not supplied.
+
+        Returns
+        -------
+        dict with keys:
+            records  -- full list of hub anomaly dicts (sorted by anomaly_score)
+            summary  -- aggregated stats (total, critical, warning, correct …)
+        """
+        if "geo_anomalies" in self._cache:
+            return self._cache["geo_anomalies"]
+
+        df = kepler_df if kepler_df is not None else self.kepler_df
+        if df is None or len(df) == 0:
+            return {"records": [], "summary": {}}
+
+        required = {"Hub ID", "WKT", "Hub_Name", "Cluster_Category", "Hub lat", "Hub Long"}
+        missing = required - set(df.columns)
+        if missing:
+            return {
+                "records": [],
+                "summary": {"error": f"Missing columns: {missing}"},
+            }
+
+        try:
+            records = detect_hub_centroid_anomalies(df)
+            summary = summarise_centroid_anomalies(records)
+        except Exception as exc:
+            return {"records": [], "summary": {"error": str(exc)}}
+
+        result = {"records": records, "summary": summary}
+        self._cache["geo_anomalies"] = result
+        return result
 
     # ──────────────────────────────────────────────
     #  COST OPTIMIZATION INTELLIGENCE
@@ -456,6 +512,12 @@ class GandalfEngine:
         if "optimize" in q and "today" in q:
             return self._q_optimize_today()
         if "anomal" in q or "unusual" in q or "outlier" in q:
+            # Hub-centroid / geospatial anomaly queries get richer treatment
+            if any(w in q for w in ("hub position", "hub centre", "hub center",
+                                    "hub polygon", "centroid", "geospatial",
+                                    "not centred", "not centered", "misplaced hub",
+                                    "hub location anomal", "hub anomal")):
+                return self._q_geospatial_anomalies()
             return self._q_anomalies()
         if "health" in q or "status" in q or "diagnostic" in q:
             return self._q_performance()
@@ -489,6 +551,10 @@ class GandalfEngine:
             return self._q_optimize_today()
         if "why" in q and "hub" in q:
             return self._q_why_hub(q)
+        if any(w in q for w in ("geospatial", "centroid", "hub centred", "hub centered",
+                                "hub polygon", "hub position", "misplaced",
+                                "hub anomal", "polygon anomal", "gandalf detect")):
+            return self._q_geospatial_anomalies()
 
         return {"text": (
             "I can help you with:\n\n"
@@ -662,6 +728,94 @@ class GandalfEngine:
         else:
             text += "\n*Within normal range.*"
         return {"text": text, "data": grp.describe().to_dict()}
+
+    def _q_geospatial_anomalies(self):
+        """
+        Rich text report on hub-centroid geospatial anomalies from the
+        kepler_gl dataset.  Requires self.kepler_df to be populated.
+        """
+        result = self.detect_geospatial_anomalies()
+        summary = result.get("summary", {})
+        records = result.get("records", [])
+
+        if summary.get("error"):
+            return {
+                "text": (
+                    f"Could not run geospatial anomaly detection: {summary['error']}\n\n"
+                    "Load the kepler_gl CSV (Hub ID, WKT, Hub_Name, Cluster_Category, "
+                    "Hub lat, Hub Long) and try again, sir."
+                ),
+                "data": None,
+            }
+
+        if not records:
+            return {
+                "text": (
+                    "No kepler_gl data loaded for geospatial analysis.\n\n"
+                    "Upload the kepler_gl CSV file and I will analyse whether each hub "
+                    "is correctly centred within its service-area polygons, sir."
+                ),
+                "data": None,
+            }
+
+        total    = summary["total_hubs"]
+        critical = summary["critical_count"]
+        warnings = summary["warning_count"]
+        correct  = summary["correct_count"]
+        errors   = summary["data_error_count"]
+
+        text = "**G.A.N.D.A.L.F. Geospatial Hub-Centroid Anomaly Report**\n\n"
+        text += (
+            f"I have analysed **{total:,} hubs** across **{total * 9:,}** polygon rings "
+            f"using Haversine distance, Rs.0 polygon containment, directional asymmetry, "
+            f"and ring monotonicity checks.\n\n"
+        )
+
+        text += "**Summary:**\n"
+        text += f"- Critical Anomaly : **{critical}** hubs ({summary['critical_pct']:.1f}%)\n"
+        text += f"- Warning          : **{warnings}** hubs ({summary['warning_pct']:.1f}%)\n"
+        text += f"- Correct          : **{correct}** hubs ({summary['correct_pct']:.1f}%)\n"
+        if errors:
+            text += f"- Data Error (skipped) : {errors} hubs\n"
+        text += "\n"
+
+        text += "**Anomaly Classification Rules:**\n"
+        text += "- **Critical** — hub outside its polygon, OR >4 km from Rs.0 centroid, OR >6 km from service centroid\n"
+        text += "- **Warning**  — hub not inside Rs.0 polygon, OR 2–4 km from Rs.0 centroid, OR asymmetric coverage >120°\n"
+        text += "- **Correct**  — hub is well-centred; all checks pass\n\n"
+
+        top10 = summary.get("top10_anomalous", [])
+        if top10:
+            text += "**Top 10 Most Anomalous Hubs:**\n\n"
+            text += "| # | Hub Name | Status | Score | Centroid Dist | Rs.0 Dist | In Rs.0 | Asymmetry |\n"
+            text += "|---|----------|--------|-------|---------------|-----------|---------|----------|\n"
+            for i, r in enumerate(top10, 1):
+                rs0d = f"{r['hub_to_rs0_centroid_km']:.2f} km" if r.get("hub_to_rs0_centroid_km") is not None else "N/A"
+                cdt  = f"{r['hub_to_weighted_centroid_km']:.2f} km" if r.get("hub_to_weighted_centroid_km") is not None else "N/A"
+                asym = f"{r['dir_asymmetry_deg']:.0f}°" if r.get("dir_asymmetry_deg") is not None else "N/A"
+                text += (
+                    f"| {i} | **{r['hub_name']}** | {r['status']} | {r['anomaly_score']} "
+                    f"| {cdt} | {rs0d} | {r['hub_in_rs0_polygon']} | {asym} |\n"
+                )
+
+        text += "\n**What this means:**\n"
+        text += (
+            "A hub with a **Critical Anomaly** is either completely outside its service "
+            "polygon or has been placed far from the centre of its coverage area. "
+            "This inflates payout for riders operating near the hub core (Rs.0 zone). "
+            "The fix is to either relocate the hub GPS pin to the polygon centroid, or "
+            "redraw the polygon boundaries around the actual hub location.\n\n"
+        )
+        text += (
+            "*Run 'geospatial anomaly report' to get the full list. "
+            "Ask 'how to fix hub [name]' for a specific relocation recommendation, sir.*"
+        )
+
+        return {
+            "text":    text,
+            "data":    top10,
+            "summary": summary,
+        }
 
     def _q_high_burn_hubs(self):
         if self.cpo_analytics is None or not self.cpo_analytics.is_loaded:

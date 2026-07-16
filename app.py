@@ -14,7 +14,6 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent / "modules"))
 
 from data_loader import DataLoader
-from map_renderer import MapRenderer
 from cost_analyzer import CostAnalyzer
 from cpo_optimizer import CPOOptimizer
 from utils import format_number
@@ -31,12 +30,18 @@ from bigquery_client import (
 )
 from cpo_analytics import CPOAnalytics
 from polygon_optimizer import PolygonOptimizer
-from gandalf_engine import GandalfEngine
 from gandalf_llm import get_llm_status, gandalf_chat
-from cluster_burn import render_burn_tab
 import json
 import streamlit.components.v1 as components
 from auth_page import render_login_page
+
+
+# ── Lazy-loaded heavy modules (deferred until first use, cached across reruns) ──
+# map_renderer pulls folium+shapely; only load when a map tab is rendered.
+@st.cache_resource(show_spinner=False)
+def _get_map_renderer():
+    from map_renderer import MapRenderer  # noqa: PLC0415
+    return MapRenderer()
 
 APP_ROOT = Path(__file__).parent
 
@@ -1192,6 +1197,12 @@ if not st.session_state.data_loaded:
             _process_and_store(cluster_df, hub_df, kepler_path=kepler_path,
                               excel_path=str(excel_path) if excel_path.exists() else None)
             st.session_state.cache_date = manifest.get("fetched_time", manifest.get("fetched_date", ""))
+            # Load any previously saved anomalies into session state
+            try:
+                from modules.hub_anomaly import load_anomalies as _load_anom
+                st.session_state["hub_anomalies"] = _load_anom(APP_ROOT / "data")
+            except Exception:
+                pass
         except Exception as _hyd_err:
             # Don't crash app on a corrupt cache — fall through to fetch UI.
             print(f"Cache hydration skipped: {_hyd_err}")
@@ -1252,6 +1263,13 @@ if not st.session_state.data_loaded:
                 excel_path=str(_excel_path) if _excel_path.exists() else None,
             )
             st.session_state.cache_date = _now.strftime("%Y-%m-%d %H:%M:%S")
+            # Hub anomaly detection (auto-fetch path)
+            try:
+                from modules.hub_anomaly import detect_hub_location_changes
+                _auto_anomalies = detect_hub_location_changes(_h_df, APP_ROOT / "data")
+                st.session_state["hub_anomalies"] = _auto_anomalies
+            except Exception as _anom_err2:
+                print(f"Hub anomaly detection skipped (auto-fetch): {_anom_err2}")
             del _cl_df, _h_df
             import gc as _gc
             _gc.collect()
@@ -1559,6 +1577,35 @@ with st.sidebar:
     elif st.session_state.data_loaded:
         st.caption("Loaded from local CSV")
 
+    # ── Hub anomaly badge in sidebar ──
+    _sb_anomalies = st.session_state.get("hub_anomalies", [])
+    if _sb_anomalies:
+        _anom_count = len(_sb_anomalies)
+        st.markdown(
+            f"""<div style="
+                background:rgba(249,115,22,0.12);
+                border-left:3px solid #f97316;
+                border-radius:8px;
+                padding:8px 12px;
+                margin:4px 0 8px 0;
+                font-family:'Montserrat',sans-serif;
+                font-size:0.72rem;
+                font-weight:700;
+                color:#f97316;
+                display:flex;align-items:center;gap:6px;">
+                &#9888; {_anom_count} hub{'s' if _anom_count>1 else ''} moved &gt;100 m
+            </div>""",
+            unsafe_allow_html=True,
+        )
+        if st.button("Clear anomaly flags", key="clear_anomalies_btn", use_container_width=True):
+            try:
+                from modules.hub_anomaly import clear_anomalies
+                clear_anomalies(APP_ROOT / "data")
+            except Exception:
+                pass
+            st.session_state["hub_anomalies"] = []
+            st.rerun()
+
     # ── GitHub backup status — persistent confirmation across reruns ──
     _gh_status = st.session_state.get("_github_backup_status")
     if _gh_status:
@@ -1639,6 +1686,14 @@ with st.sidebar:
 
                     bq_progress(0.85, "📋 Saving cache manifest...")
                     loader.save_cache_manifest(cluster_path, hub_path, kepler_path)
+
+                    # ── Step 3b: Hub location anomaly detection ──
+                    try:
+                        from modules.hub_anomaly import detect_hub_location_changes
+                        _anomalies = detect_hub_location_changes(hub_df, APP_ROOT / "data")
+                        st.session_state["hub_anomalies"] = _anomalies
+                    except Exception as _anom_err:
+                        print(f"Hub anomaly detection skipped: {_anom_err}")
 
                     # ── Step 4: Replace session state atomically ──
                     bq_progress(0.90, "🔄 Replacing old data with new records...")
@@ -1921,7 +1976,10 @@ if not st.session_state.data_loaded:
     st.stop()
 
 # Tabs
-tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["Map", "CPO Dashboard", "Recommendations", "Data", "Maps Studio", "GANDALF AI", "🔥 Burn Calc"])
+tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+    "Map", "CPO Dashboard", "Recommendations", "Data",
+    "Maps Studio", "GANDALF AI", "🔥 Burn Calc", "🎯 Hub Anomaly",
+])
 
 # ── TAB 1: MAP ──
 with tab1:
@@ -1935,6 +1993,103 @@ with tab1:
         import pandas as _pd_local
         filtered_df = _pd_local.DataFrame()
     cluster_count = len(filtered_df)
+
+    # ── Hub Anomaly Detection Panel ────────────────────────────────────────
+    _anomalies = st.session_state.get("hub_anomalies", [])
+    if _anomalies:
+        _dark = st.session_state.get("dark_mode", False)
+        _panel_bg   = "rgba(249,115,22,0.07)" if _dark else "rgba(249,115,22,0.06)"
+        _panel_row  = "rgba(249,115,22,0.05)" if _dark else "rgba(249,115,22,0.04)"
+        _panel_text = "#f97316"
+        _panel_head = "#fbd8b8" if _dark else "#7c2d12"
+        _row_text   = "#fbf9f8" if _dark else "#1b1c1c"
+        _muted      = "#9CA3AF" if _dark else "#6d7a75"
+
+        # Build table rows HTML
+        _rows_html = ""
+        for _a in _anomalies:
+            _dist_label = f"{_a['distance_m']:.0f} m"
+            _rows_html += f"""
+            <tr style="border-bottom:1px solid rgba(249,115,22,0.08);">
+              <td style="padding:9px 12px;font-weight:700;color:{_row_text};white-space:nowrap;">{_a['hub_name']}</td>
+              <td style="padding:9px 12px;color:{_muted};font-size:0.78rem;font-family:'Inter',sans-serif;">{_a['hub_id']}</td>
+              <td style="padding:9px 12px;color:{_muted};font-size:0.78rem;font-family:'Inter',sans-serif;">
+                <span style="opacity:.7">{_a['old_lat']:.5f}, {_a['old_lon']:.5f}</span>
+                <span style="margin:0 4px;color:{_panel_text};">→</span>
+                <span style="font-weight:600;">{_a['new_lat']:.5f}, {_a['new_lon']:.5f}</span>
+              </td>
+              <td style="padding:9px 12px;text-align:right;">
+                <span style="
+                  background:rgba(249,115,22,0.15);
+                  color:{_panel_text};
+                  font-weight:700;
+                  font-size:0.75rem;
+                  padding:3px 10px;
+                  border-radius:20px;
+                  white-space:nowrap;
+                  font-family:'Montserrat',sans-serif;">
+                  &#9650; {_dist_label}
+                </span>
+              </td>
+              <td style="padding:9px 12px;color:{_muted};font-size:0.72rem;white-space:nowrap;">{_a.get('detected_at','')}</td>
+            </tr>"""
+
+        st.markdown(f"""
+        <div style="
+          background:{_panel_bg};
+          border:1px solid rgba(249,115,22,0.25);
+          border-radius:16px;
+          padding:20px 24px;
+          margin-bottom:20px;
+          font-family:'Montserrat',sans-serif;
+        ">
+          <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:14px;">
+            <div style="
+              width:32px;height:32px;border-radius:8px;
+              background:rgba(249,115,22,0.15);
+              display:flex;align-items:center;justify-content:center;
+              font-size:16px;flex-shrink:0;">&#9888;</div>
+            <div style="flex:1;">
+              <div style="font-weight:800;font-size:0.9rem;color:{_panel_text};letter-spacing:-0.01em;margin-bottom:4px;">
+                Hub Location Change Detected
+              </div>
+              <div style="font-size:0.78rem;color:{_muted};line-height:1.5;">
+                <b style="color:{_row_text};">{len(_anomalies)} hub{'s' if len(_anomalies)>1 else ''}</b>
+                {'have' if len(_anomalies)>1 else 'has'} GPS coordinates that shifted <b style="color:{_panel_text};">more than 100 m</b>
+                since the previous fetch. This can happen due to a data correction, hub relocation,
+                or an erroneous update in BigQuery. Affected hubs have stale cluster polygons —
+                re-fetch or re-run clustering after confirming the new coordinates are correct.
+              </div>
+            </div>
+          </div>
+          <div style="overflow-x:auto;">
+            <table style="width:100%;border-collapse:collapse;font-family:'Inter',sans-serif;font-size:0.82rem;">
+              <thead>
+                <tr style="border-bottom:1.5px solid rgba(249,115,22,0.2);">
+                  <th style="padding:6px 12px;text-align:left;font-family:'Montserrat',sans-serif;
+                    font-size:0.6rem;font-weight:800;text-transform:uppercase;letter-spacing:0.1em;
+                    color:{_muted};">Hub Name</th>
+                  <th style="padding:6px 12px;text-align:left;font-family:'Montserrat',sans-serif;
+                    font-size:0.6rem;font-weight:800;text-transform:uppercase;letter-spacing:0.1em;
+                    color:{_muted};">Hub ID</th>
+                  <th style="padding:6px 12px;text-align:left;font-family:'Montserrat',sans-serif;
+                    font-size:0.6rem;font-weight:800;text-transform:uppercase;letter-spacing:0.1em;
+                    color:{_muted};">Old Coords → New Coords</th>
+                  <th style="padding:6px 12px;text-align:right;font-family:'Montserrat',sans-serif;
+                    font-size:0.6rem;font-weight:800;text-transform:uppercase;letter-spacing:0.1em;
+                    color:{_muted};">Shift</th>
+                  <th style="padding:6px 12px;text-align:left;font-family:'Montserrat',sans-serif;
+                    font-size:0.6rem;font-weight:800;text-transform:uppercase;letter-spacing:0.1em;
+                    color:{_muted};">Detected At</th>
+                </tr>
+              </thead>
+              <tbody>
+                {_rows_html}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
 
     # Section header
     st.markdown("""
@@ -1956,7 +2111,7 @@ with tab1:
 
     # Map
     try:
-        renderer = MapRenderer()
+        renderer = _get_map_renderer()
         map_obj = renderer.create_cluster_map(
             filtered_df, st.session_state.hub_data,
             show_rate_labels=show_labels, show_hub_markers=True,
@@ -3406,7 +3561,7 @@ with tab5:
                 _ms_hub_df = _full_hubs[_full_hubs['id'].isin(_hub_ids_in_scope)]
             else:
                 _ms_hub_df = _full_hubs
-            _ms_renderer = MapRenderer()
+            _ms_renderer = _get_map_renderer()
 
             # ── AWB stats: DuckDB on full parquet (primary) or PIP sample (fallback) ──
             # get_hub_pincode_counts() reads the entire AWB parquet (7M+ rows) via
@@ -3675,6 +3830,7 @@ with tab5:
 # ── TAB 6: GANDALF AI ──
 with tab6:
   try:
+    from gandalf_engine import GandalfEngine  # lazy: only loads when this tab is opened
     # Initialize GANDALF engine
     if "gandalf_engine" not in st.session_state:
         st.session_state["gandalf_engine"] = GandalfEngine()
@@ -3911,4 +4067,36 @@ with tab6:
 
 # ── TAB 7: BURN CALC ──
 with tab7:
+    from cluster_burn import render_burn_tab  # lazy: shapely only needed here
     render_burn_tab(st.session_state.get("bq_client"))
+
+# ── TAB 8: HUB ANOMALY DETECTION ──
+with tab8:
+    from gandalf_hub_anomaly_tab import render_hub_anomaly_tab  # lazy: folium+streamlit_folium
+    from gandalf_ml_trainer import render_ml_training_tab       # lazy: ML modules on demand
+    try:
+        # Pass the kepler_gl dataframe if already loaded in session
+        _kepler_df = st.session_state.get("kepler_df")
+
+        # Sub-tabs: Detection | ML Training
+        anom_tab1, anom_tab2 = st.tabs(["🗺️ Detection & Report", "🤖 ML Training (G.A.N.D.A.L.F.)"])
+
+        with anom_tab1:
+            render_hub_anomaly_tab(session_kepler_df=_kepler_df)
+
+        with anom_tab2:
+            # Pull records from session cache if detection was already run
+            _cached_records = None
+            for _k in st.session_state:
+                if _k.startswith("gandalf_anomaly_") and "records" in st.session_state.get(_k, {}):
+                    _cached_records = st.session_state[_k]["records"]
+                    break
+            if _cached_records:
+                render_ml_training_tab(_cached_records)
+            else:
+                st.info("Run the Hub Anomaly Detection scan on the **Detection & Report** tab first, "
+                        "then return here to train G.A.N.D.A.L.F.")
+    except Exception as _anom_err:
+        st.error(f"Hub Anomaly tab error: {_anom_err}")
+        import traceback
+        st.code(traceback.format_exc())
