@@ -280,24 +280,27 @@ def _cat_to_float(cat_str):
 def _parse_wkt_geometry(wkt_str):
     """
     Parse WKT string and return (geometry, centroid_lat, centroid_lon,
-    area_deg2, perimeter_deg) or (None, None, None, None, None).
-    Only returns valid geometries whose centroid falls inside India bbox.
+    area_deg2, perimeter_deg, status) where status is one of:
+      "ok"            — valid polygon inside India
+      "outside_india" — polygon centroid outside India bbox (deactivated hub)
+      "parse_error"   — invalid/empty WKT or geometry error
+    Callers that only need 5 values can unpack with: geom, clat, clon, area, peri, _ = ...
     """
-    if not _SHAPELY_OK or not wkt_str:
-        return None, None, None, None, None
+    if not _SHAPELY_OK or not wkt_str or str(wkt_str).strip().lower() in ("", "nan", "none"):
+        return None, None, None, None, None, "parse_error"
     try:
         geom = _shapely_wkt.loads(wkt_str)
         c = geom.centroid
         if not _in_india(c.y, c.x):
-            return None, None, None, None, None
-        return geom, c.y, c.x, geom.area, geom.length
+            return None, None, None, None, None, "outside_india"
+        return geom, c.y, c.x, geom.area, geom.length, "ok"
     except Exception:
-        return None, None, None, None, None
+        return None, None, None, None, None, "parse_error"
 
 
 def _parse_wkt_centroid(wkt_str):
     """Return (centroid_lat, centroid_lon, area_deg2) or (None, None, None)."""
-    _, clat, clon, area, _ = _parse_wkt_geometry(wkt_str)
+    _, clat, clon, area, _, _status = _parse_wkt_geometry(wkt_str)
     return clat, clon, area
 
 
@@ -516,10 +519,14 @@ def detect_hub_centroid_anomalies(kepler_df, expected_rs0_radius_km=4.0):
         # Parse polygons — keep only those with valid India centroids
         valid_rows = []
         corrupt_count = 0
+        outside_india_count = 0
         for _, row in grp.iterrows():
-            geom, clat, clon, area, peri = _parse_wkt_geometry(str(row.get("WKT", "")))
+            geom, clat, clon, area, peri, _reason = _parse_wkt_geometry(str(row.get("WKT", "")))
             if clat is None:
-                corrupt_count += 1
+                if _reason == "outside_india":
+                    outside_india_count += 1
+                else:
+                    corrupt_count += 1
                 continue
             valid_rows.append({
                 "wkt":    str(row.get("WKT", "")),
@@ -533,6 +540,10 @@ def detect_hub_centroid_anomalies(kepler_df, expected_rs0_radius_km=4.0):
             })
 
         if not valid_rows:
+            # All polygons outside India → deactivated hub, exclude from results entirely
+            if outside_india_count > 0:
+                continue
+            # Genuine data quality issue (corrupt WKT) → still report as Data Error
             results.append(_err_record(hub_id, hub_name, hub_lat, hub_lon,
                                        len(grp), f"ALL_POLYGONS_CORRUPT; {dq_note}"))
             continue
