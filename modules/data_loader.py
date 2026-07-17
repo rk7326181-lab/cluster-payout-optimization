@@ -636,12 +636,21 @@ class DataLoader:
         # Simplify polygon vertices to reduce memory footprint.
         # tolerance=0.001° ≈ 111 m at equator — imperceptible at city/zone scale
         # but cuts Shapely object memory and GeoJSON size by ~60-75%.
-        try:
-            processed_df['geometry'] = processed_df['geometry'].apply(
-                lambda g: g.simplify(0.001, preserve_topology=True) if g is not None else None
-            )
-        except Exception:
-            pass  # if shapely isn't available or any geometry fails, skip simplification
+        # Per-row try-except: one bad polygon falls back to original; others still simplify.
+        def _simplify_geom(g):
+            if g is None:
+                return None
+            try:
+                return g.simplify(0.001, preserve_topology=True)
+            except Exception:
+                return g
+
+        processed_df['geometry'] = processed_df['geometry'].apply(_simplify_geom)
+        # Keep boundary WKT in sync with the (now simplified) geometry so
+        # Kepler CSV exports, AWB PIP checks, and centroid calcs all agree.
+        processed_df['boundary'] = processed_df['geometry'].apply(
+            lambda g: g.wkt if g is not None else None
+        )
 
         # Calculate centroids where needed
         needs_centroid = calculate_centroid | processed_df['center_lat'].isna()

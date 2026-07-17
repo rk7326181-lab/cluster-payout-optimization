@@ -14,7 +14,6 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).parent / "modules"))
 
 from data_loader import DataLoader
-from cost_analyzer import CostAnalyzer
 from cpo_optimizer import CPOOptimizer
 from utils import format_number
 from bigquery_client import (
@@ -1071,7 +1070,6 @@ def _process_and_store(cluster_df, hub_df, kepler_path=None, excel_path=None):
     if excel_path and Path(excel_path).exists():
         cpo_optimizer = CPOOptimizer(excel_path=str(excel_path))
         processed_df = cpo_optimizer.enrich_cluster_data(processed_df)
-        st.session_state.cpo_optimizer = cpo_optimizer
     if 'hub_category' not in processed_df.columns:
         hub_cat_lookup = hub_df.drop_duplicates('id').set_index('id')['hub_category'].to_dict() if 'hub_category' in hub_df.columns else {}
         processed_df['hub_category'] = processed_df['hub_id'].map(hub_cat_lookup)
@@ -1175,7 +1173,6 @@ if 'data_loaded' not in st.session_state:
     st.session_state.hub_data = None
     st.session_state.processed_data = None
     st.session_state.filtered_data = None
-    st.session_state.cpo_optimizer = None
     st.session_state.kepler_path = None
     st.session_state.cache_date = None
 elif 'filtered_data' not in st.session_state:
@@ -1203,9 +1200,8 @@ if not st.session_state.data_loaded:
                 st.session_state["hub_anomalies"] = _load_anom(APP_ROOT / "data")
             except Exception:
                 pass
-        except Exception as _hyd_err:
-            # Don't crash app on a corrupt cache — fall through to fetch UI.
-            print(f"Cache hydration skipped: {_hyd_err}")
+        except Exception:
+            pass  # Don't crash app on a corrupt cache — fall through to fetch UI.
 
     # ── Auto-fetch from BigQuery on startup if no local cache ──────────────
     # On Streamlit Cloud the `data/` directory is wiped on container reboot,
@@ -1268,8 +1264,8 @@ if not st.session_state.data_loaded:
                 from modules.hub_anomaly import detect_hub_location_changes
                 _auto_anomalies = detect_hub_location_changes(_h_df, APP_ROOT / "data")
                 st.session_state["hub_anomalies"] = _auto_anomalies
-            except Exception as _anom_err2:
-                print(f"Hub anomaly detection skipped (auto-fetch): {_anom_err2}")
+            except Exception:
+                pass
             del _cl_df, _h_df
             import gc as _gc
             _gc.collect()
@@ -1310,8 +1306,7 @@ def _get_cpo_analytics():
     if cpo_path.exists():
         try:
             st.session_state.cpo_analytics = CPOAnalytics(excel_path=str(cpo_path))
-        except Exception as e:
-            print(f"CPOAnalytics lazy-init failed: {e}")
+        except Exception:
             st.session_state.cpo_analytics = None
     return st.session_state.cpo_analytics
 
@@ -1323,6 +1318,86 @@ if not st.session_state.get("authenticated", False):
 # Inject CSS
 inject_custom_css()
 
+# ── Daily 5 AM IST auto-refresh ──────────────────────────────────────
+# When a user opens the app after 5 AM IST and the cached data is from
+# a previous day, automatically fetch fresh data from BigQuery so they
+# always start with today's figures without clicking "Fetch".
+try:
+    import pytz as _pytz_m
+    _ist_tz = _pytz_m.timezone("Asia/Kolkata")
+    _now_ist = datetime.now(_ist_tz)
+    _today_ist = _now_ist.strftime('%Y-%m-%d')
+    _morning_key = f"_morning_fetch_{_today_ist}"
+    _morning_disabled = (
+        (APP_ROOT / "data" / "auto_fetch.disabled").exists()
+        or os.environ.get("DISABLE_BQ_AUTOFETCH") == "1"
+    )
+    _cache_stale = False
+    if st.session_state.get("cache_date"):
+        try:
+            _cd = datetime.strptime(st.session_state["cache_date"], "%Y-%m-%d %H:%M:%S")
+            _cache_stale = _cd.strftime('%Y-%m-%d') < _today_ist
+        except Exception:
+            _cache_stale = True
+    if (
+        not st.session_state.get(_morning_key)
+        and _now_ist.hour >= 5
+        and st.session_state.data_loaded
+        and st.session_state.get("bq_client") is not None
+        and not _morning_disabled
+        and _cache_stale
+    ):
+        st.session_state[_morning_key] = True
+        _m_status = st.empty()
+        _m_status.info("⏳ Fetching fresh data from BigQuery (daily 5 AM refresh)…", icon="🔄")
+        try:
+            from modules.bigquery_client import fetch_live_clusters, fetch_hub_locations
+            _m_now = datetime.now()
+            _m_cl, _m_err = fetch_live_clusters(st.session_state["bq_client"], force_refresh=True)
+            if _m_err:
+                raise RuntimeError(_m_err)
+            _m_h, _m_err2 = fetch_hub_locations(
+                st.session_state["bq_client"], _m_now.year, _m_now.month
+            )
+            if _m_err2:
+                raise RuntimeError(_m_err2)
+            _m_loader = DataLoader()
+            _m_cl = _m_loader._clean_cluster_data(_m_cl)
+            _m_h = _m_loader._clean_hub_data(_m_h)
+            _m_date_str = _m_now.strftime('%d%m%Y')
+            _m_cp = APP_ROOT / "data" / f"clustering_live_{_m_date_str}.csv"
+            _m_hp = APP_ROOT / "data" / f"hub_Lat_Long{_m_date_str}.csv"
+            _m_cp.parent.mkdir(parents=True, exist_ok=True)
+            _m_cl.to_csv(_m_cp, index=False, encoding="utf-8")
+            _m_h.to_csv(_m_hp, index=False, encoding="utf-8")
+            _m_kep_df, _m_kp = _m_loader.generate_kepler_csv(_m_cl, _m_h)
+            del _m_kep_df
+            _m_loader.save_cache_manifest(_m_cp, _m_hp, _m_kp)
+            _m_excel = APP_ROOT / "data" / "uploaded_cost_data.xlsx"
+            _process_and_store(
+                _m_cl, _m_h, kepler_path=_m_kp,
+                excel_path=str(_m_excel) if _m_excel.exists() else None,
+            )
+            st.session_state.cache_date = _m_now.strftime("%Y-%m-%d %H:%M:%S")
+            try:
+                from modules.hub_anomaly import detect_hub_location_changes
+                st.session_state["hub_anomalies"] = detect_hub_location_changes(
+                    _m_h, APP_ROOT / "data"
+                )
+            except Exception:
+                pass
+            del _m_cl, _m_h
+            import gc as _m_gc; _m_gc.collect()
+            _m_status.success("✅ Data refreshed from BigQuery (daily 5 AM auto-fetch)", icon="✅")
+            time.sleep(0.5)
+            st.rerun()
+        except Exception as _m_ex:
+            st.warning(
+                f"Morning auto-refresh skipped ({_m_ex}). Use the sidebar Fetch button.",
+                icon="⚠️",
+            )
+except Exception:
+    pass
 
 # ════════════════════════════════════════════════════
 # SIDEBAR — "The Command Center"
@@ -1693,8 +1768,8 @@ with st.sidebar:
                         from modules.hub_anomaly import detect_hub_location_changes
                         _anomalies = detect_hub_location_changes(hub_df, APP_ROOT / "data")
                         st.session_state["hub_anomalies"] = _anomalies
-                    except Exception as _anom_err:
-                        print(f"Hub anomaly detection skipped: {_anom_err}")
+                    except Exception:
+                        pass
 
                     # ── Step 4: Replace session state atomically ──
                     bq_progress(0.90, "🔄 Replacing old data with new records...")
@@ -1754,7 +1829,6 @@ with st.sidebar:
                             "ts":  datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                         }
                         bq_progress(1.0, "✅ Complete — fetched & loaded (set GH_TOKEN to persist across reboots)")
-                    print(f"persist_cache_to_git: {_info}")
 
                     status_detail.empty()
                     time.sleep(0.3)
@@ -1857,7 +1931,6 @@ with st.sidebar:
         if st.session_state.data_loaded:
             cpo = CPOOptimizer(excel_path=str(excel_path))
             st.session_state.processed_data = cpo.enrich_cluster_data(st.session_state.processed_data)
-            st.session_state.cpo_optimizer = cpo
         # Also refresh CPO analytics (hub-level analysis) — reset lazy guard
         # so _get_cpo_analytics() rebuilds against the new Excel file.
         st.session_state.cpo_analytics = CPOAnalytics(excel_path=str(excel_path))

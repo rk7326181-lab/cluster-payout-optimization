@@ -249,8 +249,13 @@ class MapRenderer:
             # Trim microseconds: 2025-06-02T18:30:00.144754 → 2025-06-02 18:30:00
             return s.replace('T', ' ').split('.')[0]
 
-        # Pre-filter rows with valid geometry — skips isna() check per iteration
-        _render_df = cluster_df[cluster_df['geometry'].notna()]
+        # Pre-filter rows with valid geometry — skips isna() check per iteration.
+        # Guard against data that was loaded without a boundary column.
+        _render_df = (
+            cluster_df[cluster_df['geometry'].notna()]
+            if 'geometry' in cluster_df.columns
+            else cluster_df.iloc[:0]
+        )
 
         features = []
         for idx, row in _render_df.iterrows():
