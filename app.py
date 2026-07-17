@@ -1557,9 +1557,10 @@ with st.sidebar:
         elif pin_search:
             mask &= pin_norm.str.contains(pin_search, na=False)
 
-        # Single view — pandas usually returns a view here, no copy. We rely on
-        # downstream consumers being read-only against filtered_data.
-        filtered_df = df[mask]
+        # When no filter is active (all-True mask), use the original reference
+        # instead of creating a full copy — boolean masking always copies in pandas,
+        # which wastes 100-500 MB on a 50k-row dataset with no active filter.
+        filtered_df = df if mask.all() else df[mask]
 
         st.session_state.filtered_data = filtered_df
         st.session_state.selected_hub = selected_hubs[0] if len(selected_hubs) == 1 else None

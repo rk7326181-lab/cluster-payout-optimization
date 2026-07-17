@@ -236,10 +236,24 @@ class MapRenderer:
         total_clusters = len(cluster_df)
         is_large = total_clusters > 500
 
+        # Pre-check optional columns once — avoids per-row index lookups
+        _has_suffix   = 'cluster_suffix' in cluster_df.columns
+        _has_created  = 'created' in cluster_df.columns
+        _has_modified = 'modified' in cluster_df.columns
+
+        # Helper defined outside loop — function objects are expensive inside iterrows
+        def _fmt_dt(v):
+            s = str(v) if v is not None else ''
+            if s in ('', 'nan', 'NaT', 'None'):
+                return ''
+            # Trim microseconds: 2025-06-02T18:30:00.144754 → 2025-06-02 18:30:00
+            return s.replace('T', ' ').split('.')[0]
+
+        # Pre-filter rows with valid geometry — skips isna() check per iteration
+        _render_df = cluster_df[cluster_df['geometry'].notna()]
+
         features = []
-        for idx, row in cluster_df.iterrows():
-            if pd.isna(row.get('geometry')):
-                continue
+        for idx, row in _render_df.iterrows():
             try:
                 geom = row['geometry']
                 surge_amount = row.get('surge_amount', 0)
@@ -259,13 +273,6 @@ class MapRenderer:
                 if is_large:
                     geo = self._reduce_precision(geo, 4)
 
-                def _fmt_dt(v):
-                    s = str(v) if v is not None else ''
-                    if s in ('', 'nan', 'NaT', 'None'):
-                        return ''
-                    # Trim microseconds: 2025-06-02T18:30:00.144754 → 2025-06-02 18:30:00
-                    return s.replace('T', ' ').split('.')[0]
-
                 feature = {
                     "type": "Feature",
                     "geometry": geo,
@@ -277,9 +284,9 @@ class MapRenderer:
                         "pincode": pincode,
                         "surge_rate": str(cluster_category),
                         "rate_category": str(row.get('rate_category', 'N/A')),
-                        "cluster_suffix": str(row.get('cluster_suffix', 'N/A')) if 'cluster_suffix' in row.index else 'N/A',
-                        "created": _fmt_dt(row.get('created')),
-                        "modified": _fmt_dt(row.get('modified')),
+                        "cluster_suffix": str(row.get('cluster_suffix', 'N/A')) if _has_suffix else 'N/A',
+                        "created": _fmt_dt(row.get('created', '')) if _has_created else '',
+                        "modified": _fmt_dt(row.get('modified', '')) if _has_modified else '',
                     }
                 }
                 features.append(feature)
