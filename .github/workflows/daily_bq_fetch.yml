@@ -2,42 +2,77 @@ name: Daily BigQuery Refresh (5 AM IST)
 
 on:
   schedule:
-    # 5 AM IST = 23:30 UTC (previous day)
+    # 5 AM IST = 23:30 UTC (previous calendar day)
     - cron: '30 23 * * *'
-  workflow_dispatch:  # allow manual trigger from GitHub Actions tab
+  workflow_dispatch:   # allow manual trigger from the GitHub Actions tab
 
 jobs:
   refresh-data:
     runs-on: ubuntu-latest
+
     steps:
+      # ── Step 1: Check that the secret is configured ──────────────────
+      - name: Check BQ secret is configured
+        id: check_secret
+        env:
+          SECRET: ${{ secrets.BQ_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$SECRET" ]; then
+            echo "::warning::BQ_SERVICE_ACCOUNT_JSON secret is not set."
+            echo "To enable daily refresh: go to your repo → Settings → Secrets and variables → Actions → New repository secret"
+            echo "  Name:  BQ_SERVICE_ACCOUNT_JSON"
+            echo "  Value: (paste the full contents of your service account JSON key file)"
+            echo "secret_set=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "secret_set=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # ── Skip all remaining steps if secret not configured ────────────
       - name: Checkout repository
+        if: steps.check_secret.outputs.secret_set == 'true'
         uses: actions/checkout@v4
 
       - name: Set up Python
+        if: steps.check_secret.outputs.secret_set == 'true'
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
           cache: 'pip'
 
       - name: Install dependencies
+        if: steps.check_secret.outputs.secret_set == 'true'
         run: |
-          pip install --quiet google-cloud-bigquery pandas pyarrow shapely pytz
+          pip install --quiet \
+            google-cloud-bigquery \
+            google-cloud-bigquery-storage \
+            google-auth \
+            pandas \
+            pyarrow \
+            shapely \
+            pytz \
+            db-dtypes \
+            openpyxl
 
-      - name: Write service account key
+      - name: Write service account key file
+        if: steps.check_secret.outputs.secret_set == 'true'
         env:
           BQ_SERVICE_ACCOUNT_JSON: ${{ secrets.BQ_SERVICE_ACCOUNT_JSON }}
-        run: |
-          echo "$BQ_SERVICE_ACCOUNT_JSON" > /tmp/sa_key.json
+        run: echo "$BQ_SERVICE_ACCOUNT_JSON" > /tmp/sa_key.json
 
       - name: Fetch data from BigQuery
+        if: steps.check_secret.outputs.secret_set == 'true'
         env:
           GOOGLE_APPLICATION_CREDENTIALS: /tmp/sa_key.json
         run: python scripts/daily_fetch.py
 
       - name: Commit updated data files
+        if: steps.check_secret.outputs.secret_set == 'true'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/
-          git diff --cached --quiet || git commit -m "chore: daily BQ refresh $(date -u +'%Y-%m-%d')"
+          # Only commit if there are changes
+          git diff --cached --quiet \
+            && echo "No data changes to commit." \
+            || git commit -m "chore: daily BQ refresh $(date -u +'%Y-%m-%d')"
           git push

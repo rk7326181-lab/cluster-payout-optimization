@@ -1326,16 +1326,16 @@ inject_custom_css()
 # "Retry Auto-Connect" button clears the sentinel and tries again.
 init_bq_on_startup()
 
-# ── Daily 5 AM IST auto-refresh ──────────────────────────────────────
-# When a user opens the app after 5 AM IST and the cached data is from
-# a previous day, automatically fetch fresh data from BigQuery so they
-# always start with today's figures without clicking "Fetch".
+# ── Daily 5 AM IST stale-data banner (non-blocking) ──────────────────
+# When cached data is from a previous day and it's after 5 AM IST,
+# show a lightweight notification banner. The actual BQ fetch only runs
+# when the user clicks "Refresh Now" — never blocks page render.
 try:
     import pytz as _pytz_m
     _ist_tz = _pytz_m.timezone("Asia/Kolkata")
     _now_ist = datetime.now(_ist_tz)
     _today_ist = _now_ist.strftime('%Y-%m-%d')
-    _morning_key = f"_morning_fetch_{_today_ist}"
+    _morning_key = f"_morning_banner_{_today_ist}"
     _morning_disabled = (
         (APP_ROOT / "data" / "auto_fetch.disabled").exists()
         or os.environ.get("DISABLE_BQ_AUTOFETCH") == "1"
@@ -1347,8 +1347,10 @@ try:
             _cache_stale = _cd.strftime('%Y-%m-%d') < _today_ist
         except Exception:
             _cache_stale = True
+    # Only show banner once per day — user can dismiss or click Refresh
     if (
         not st.session_state.get(_morning_key)
+        and not st.session_state.get("_morning_banner_dismissed")
         and _now_ist.hour >= 5
         and st.session_state.data_loaded
         and st.session_state.get("bq_client") is not None
@@ -1356,54 +1358,24 @@ try:
         and _cache_stale
     ):
         st.session_state[_morning_key] = True
-        _m_status = st.empty()
-        _m_status.info("⏳ Fetching fresh data from BigQuery (daily 5 AM refresh)…", icon="🔄")
-        try:
-            from modules.bigquery_client import fetch_live_clusters, fetch_hub_locations
-            _m_now = datetime.now()
-            _m_cl, _m_err = fetch_live_clusters(st.session_state["bq_client"], force_refresh=True)
-            if _m_err:
-                raise RuntimeError(_m_err)
-            _m_h, _m_err2 = fetch_hub_locations(
-                st.session_state["bq_client"], _m_now.year, _m_now.month
+        _b_cache_str = st.session_state.get("cache_date", "previous session")
+        _b_col1, _b_col2, _b_col3 = st.columns([0.72, 0.16, 0.12])
+        with _b_col1:
+            st.info(
+                f"📅 Data last fetched: **{_b_cache_str}**. Fresh data is available from BigQuery.",
+                icon="🔔",
             )
-            if _m_err2:
-                raise RuntimeError(_m_err2)
-            _m_loader = DataLoader()
-            _m_cl = _m_loader._clean_cluster_data(_m_cl)
-            _m_h = _m_loader._clean_hub_data(_m_h)
-            _m_date_str = _m_now.strftime('%d%m%Y')
-            _m_cp = APP_ROOT / "data" / f"clustering_live_{_m_date_str}.csv"
-            _m_hp = APP_ROOT / "data" / f"hub_Lat_Long{_m_date_str}.csv"
-            _m_cp.parent.mkdir(parents=True, exist_ok=True)
-            _m_cl.to_csv(_m_cp, index=False, encoding="utf-8")
-            _m_h.to_csv(_m_hp, index=False, encoding="utf-8")
-            _m_kep_df, _m_kp = _m_loader.generate_kepler_csv(_m_cl, _m_h)
-            del _m_kep_df
-            _m_loader.save_cache_manifest(_m_cp, _m_hp, _m_kp)
-            _m_excel = APP_ROOT / "data" / "uploaded_cost_data.xlsx"
-            _process_and_store(
-                _m_cl, _m_h, kepler_path=_m_kp,
-                excel_path=str(_m_excel) if _m_excel.exists() else None,
-            )
-            st.session_state.cache_date = _m_now.strftime("%Y-%m-%d %H:%M:%S")
-            try:
-                from modules.hub_anomaly import detect_hub_location_changes
-                st.session_state["hub_anomalies"] = detect_hub_location_changes(
-                    _m_h, APP_ROOT / "data"
-                )
-            except Exception:
-                pass
-            del _m_cl, _m_h
-            import gc as _m_gc; _m_gc.collect()
-            _m_status.success("✅ Data refreshed from BigQuery (daily 5 AM auto-fetch)", icon="✅")
-            time.sleep(0.5)
-            st.rerun()
-        except Exception as _m_ex:
-            st.warning(
-                f"Morning auto-refresh skipped ({_m_ex}). Use the sidebar Fetch button.",
-                icon="⚠️",
-            )
+        with _b_col2:
+            if st.button("↻ Refresh Now", use_container_width=True, key="_morning_refresh_btn"):
+                # Reset the auto-fetch guard so the startup block re-triggers on rerun
+                st.session_state.data_loaded = False
+                st.session_state["_bq_autofetch_attempted"] = False
+                st.session_state["_morning_banner_dismissed"] = True
+                st.rerun()
+        with _b_col3:
+            if st.button("✕ Dismiss", use_container_width=True, key="_morning_dismiss_btn"):
+                st.session_state["_morning_banner_dismissed"] = True
+                st.rerun()
 except Exception:
     pass
 
