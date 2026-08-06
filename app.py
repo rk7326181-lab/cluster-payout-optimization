@@ -1162,7 +1162,8 @@ def get_logo_base64():
 # ════════════════════════════════════════════════════
 # INIT SESSION STATE + AUTO-LOAD CACHE
 # ════════════════════════════════════════════════════
-init_bq_on_startup()
+# NOTE: init_bq_on_startup() runs AFTER the auth gate (below) so the login
+# page renders instantly instead of waiting on network calls to Google.
 
 if 'authenticated' not in st.session_state:
     st.session_state.authenticated = False
@@ -1184,7 +1185,9 @@ elif 'filtered_data' not in st.session_state:
 # This MUST be at module level (not inside the cold-init branch) so it runs
 # both on a fresh Streamlit Cloud container and on subsequent reruns where
 # data_loaded already exists but is still False.
-if not st.session_state.data_loaded:
+# Gated on authentication so the login page renders instantly — the 15 MB
+# CSV parse + 14k polygon build only starts once the user is signed in.
+if st.session_state.get("authenticated") and not st.session_state.data_loaded:
     loader = DataLoader()
     manifest = loader.get_cache_manifest()
     if manifest:
@@ -1317,6 +1320,11 @@ if not st.session_state.get("authenticated", False):
 
 # Inject CSS
 inject_custom_css()
+
+# ── BigQuery connect — post-login, once per session (see init's sentinel).
+# A failed attempt is remembered so reruns stay fast; the sidebar
+# "Retry Auto-Connect" button clears the sentinel and tries again.
+init_bq_on_startup()
 
 # ── Daily 5 AM IST auto-refresh ──────────────────────────────────────
 # When a user opens the app after 5 AM IST and the cached data is from
@@ -1491,6 +1499,7 @@ with st.sidebar:
 
             # Always show Retry button
             if st.button("Retry Auto-Connect", key="retry_connect_btn", use_container_width=True):
+                st.session_state.pop("_bq_connect_attempted", None)
                 with st.spinner("Retrying BigQuery connection..."):
                     _c, _m, _e = bq_auto_connect()
                 if _c:
@@ -2183,16 +2192,32 @@ with tab1:
             show_labels = False
             st.caption(f"{cluster_count:,} clusters — rate on click")
 
-    # Map
+    # Map — memoized: rebuilding 14k polygons + a multi-MB HTML string on every
+    # rerun was the biggest per-interaction cost. Rebuild only when the filter
+    # scope, data version, or map options actually change.
     try:
-        renderer = _get_map_renderer()
-        map_obj = renderer.create_cluster_map(
-            filtered_df, st.session_state.hub_data,
-            show_rate_labels=show_labels, show_hub_markers=True,
-            selected_hub=st.session_state.get('selected_hub'),
-            color_mode='pincode' if color_mode == "Pincode" else 'rate'
+        _map_sig = (
+            st.session_state.get("cache_date") or "",
+            tuple(st.session_state.get("selected_hubs") or ()),
+            tuple(st.session_state.get("selected_pincodes") or ()),
+            st.session_state.get("cat_filter") or "",
+            len(filtered_df),
+            show_labels,
+            color_mode,
+            st.session_state.get('selected_hub'),
         )
-        st.components.v1.html(map_obj._repr_html_(), height=620)
+        if st.session_state.get("_tab1_map_sig") != _map_sig or "_tab1_map_html" not in st.session_state:
+            renderer = _get_map_renderer()
+            map_obj = renderer.create_cluster_map(
+                filtered_df, st.session_state.hub_data,
+                show_rate_labels=show_labels, show_hub_markers=True,
+                selected_hub=st.session_state.get('selected_hub'),
+                color_mode='pincode' if color_mode == "Pincode" else 'rate'
+            )
+            st.session_state["_tab1_map_html"] = map_obj._repr_html_()
+            st.session_state["_tab1_map_sig"] = _map_sig
+            del map_obj
+        st.components.v1.html(st.session_state["_tab1_map_html"], height=620)
     except Exception as e:
         st.error(f"Map error: {str(e)}")
 
@@ -3015,11 +3040,15 @@ with tab4:
         with col_d3:
             kp = st.session_state.get('kepler_path')
             if kp and Path(kp).exists():
-                # Stream the file straight off disk — no pandas round-trip.
-                with open(kp, "rb") as _kfh:
-                    _kep_bytes = _kfh.read()
+                # Read once per file version (path+mtime), not on every rerun —
+                # this is a ~15 MB read that used to repeat per interaction.
+                _kep_key = (kp, Path(kp).stat().st_mtime)
+                if st.session_state.get("_kep_bytes_key") != _kep_key:
+                    with open(kp, "rb") as _kfh:
+                        st.session_state["_kep_bytes"] = _kfh.read()
+                    st.session_state["_kep_bytes_key"] = _kep_key
                 st.download_button(
-                    "Download Kepler CSV", _kep_bytes,
+                    "Download Kepler CSV", st.session_state["_kep_bytes"],
                     f"kepler_gl_final_main_{date_str}_csv.csv", "text/csv",
                     use_container_width=True,
                 )
@@ -3891,7 +3920,13 @@ with tab5:
 
     # Warn when cluster count exceeds the Maps Studio inline-JSON cap (5 000 polygons).
     _ms_feature_count = len(((_ms_cluster_geojson or {}).get("features")) or [])
-    maps_html = get_free_maps_html(_ms_cluster_geojson, _ms_hub_list, _ms_awb_data, _ms_hexbin_data)
+    # Memoized like _ms_payload: json.dumps of 14k features into a 194 KB HTML
+    # template is a multi-MB string build — skip it when the scope is unchanged.
+    if st.session_state.get("_ms_html_sig") != _ms_sig or "_ms_html" not in st.session_state:
+        st.session_state["_ms_html"] = get_free_maps_html(
+            _ms_cluster_geojson, _ms_hub_list, _ms_awb_data, _ms_hexbin_data)
+        st.session_state["_ms_html_sig"] = _ms_sig
+    maps_html = st.session_state["_ms_html"]
 
     # Full-height map studio — hide Streamlit chrome for immersive view
     st.markdown("""

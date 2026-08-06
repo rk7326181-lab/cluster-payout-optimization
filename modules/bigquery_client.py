@@ -127,8 +127,10 @@ def _connect_from_streamlit_secrets():
     Connect using Streamlit secrets. Mirrors the Clustering-web-app method exactly.
     Reads [gcp_credentials] (type=authorized_user or service_account),
     or falls back to [google_oauth] section.
-    Returns (client, auth_mode) or (None, None).
+    Returns (client, auth_mode, error_msg) — error_msg is the last failure so
+    a bad/expired token is reported instead of silently showing "not connected".
     """
+    _err = None
     # Primary: [gcp_credentials] section — same format as Clustering-web-app
     try:
         raw = st.secrets.get("gcp_credentials", {})
@@ -141,8 +143,8 @@ def _connect_from_streamlit_secrets():
                     creds_dict, scopes=OAUTH_SCOPES
                 )
                 client = bigquery.Client(project=PROJECT_ID, credentials=creds)
-                client.query("SELECT 1").result(timeout=15)
-                return client, "service_account"
+                client.query("SELECT 1", timeout=10).result(timeout=15)
+                return client, "service_account", None
             elif cred_type == "authorized_user":
                 creds = OAuthCredentials(
                     token=None,
@@ -153,10 +155,10 @@ def _connect_from_streamlit_secrets():
                 )
                 creds.refresh(AuthRequest())
                 client = bigquery.Client(project=PROJECT_ID, credentials=creds)
-                client.query("SELECT 1").result(timeout=15)
-                return client, "streamlit_oauth"
-    except Exception:
-        pass
+                client.query("SELECT 1", timeout=10).result(timeout=15)
+                return client, "streamlit_oauth", None
+    except Exception as e:
+        _err = f"[gcp_credentials] failed: {e}"
 
     # Fallback: [google_oauth] section (flat key=value format)
     try:
@@ -171,22 +173,22 @@ def _connect_from_streamlit_secrets():
             )
             creds.refresh(AuthRequest())
             client = bigquery.Client(project=PROJECT_ID, credentials=creds)
-            client.query("SELECT 1").result(timeout=15)
-            return client, "streamlit_oauth"
-    except Exception:
-        pass
+            client.query("SELECT 1", timeout=10).result(timeout=15)
+            return client, "streamlit_oauth", None
+    except Exception as e:
+        _err = f"[google_oauth] failed: {e}"
 
     # Fallback: [gcp_service_account] section
     try:
         if "gcp_service_account" in st.secrets:
             creds_dict = json.loads(json.dumps(dict(st.secrets["gcp_service_account"])))
             client = bigquery.Client.from_service_account_info(creds_dict, project=PROJECT_ID)
-            client.query("SELECT 1").result(timeout=15)
-            return client, "streamlit_secrets"
-    except Exception:
-        pass
+            client.query("SELECT 1", timeout=10).result(timeout=15)
+            return client, "streamlit_secrets", None
+    except Exception as e:
+        _err = f"[gcp_service_account] failed: {e}"
 
-    return None, None
+    return None, None, _err
 
 
 def auto_connect():
@@ -201,14 +203,14 @@ def auto_connect():
         return None, None, "google-cloud-bigquery not installed. Run: pip install google-cloud-bigquery"
 
     # Option 1 — Streamlit secrets (primary for Streamlit Cloud)
-    client, mode = _connect_from_streamlit_secrets()
+    client, mode, _secrets_err = _connect_from_streamlit_secrets()
     if client:
         return client, mode, None
 
     # Option 2 — Application Default Credentials (gcloud auth — local dev)
     try:
         client = bigquery.Client(project=PROJECT_ID)
-        client.query("SELECT 1").result(timeout=15)
+        client.query("SELECT 1", timeout=10).result(timeout=15)
         return client, "adc", None
     except Exception:
         pass
@@ -219,7 +221,7 @@ def auto_connect():
         creds = _load_cached_oauth_credentials()
         if creds:
             client = bigquery.Client(project=PROJECT_ID, credentials=creds)
-            client.query("SELECT 1").result(timeout=15)
+            client.query("SELECT 1", timeout=10).result(timeout=15)
             return client, "google_oauth", None
     except Exception as _e:
         _estr = str(_e)
@@ -238,6 +240,12 @@ def auto_connect():
 
     if _last_403_msg:
         return None, "needs_key", _last_403_msg
+    if _secrets_err:
+        _hint = ""
+        if "invalid_grant" in _secrets_err or "Reauthentication" in _secrets_err:
+            _hint = (" — the saved token has EXPIRED. Run `python generate_bq_token.py` "
+                     "locally and update the [google_oauth] block in Streamlit secrets.")
+        return None, "needs_key", _secrets_err + _hint
     return None, "needs_key", None
 
 
@@ -315,6 +323,9 @@ def init_bq_on_startup():
     """
     if st.session_state.get("bq_client") is not None:
         return  # Already connected
+    if st.session_state.get("_bq_connect_attempted"):
+        return  # Already tried this session — the Retry button re-attempts.
+    st.session_state["_bq_connect_attempted"] = True
 
     client, mode, err = auto_connect()
     if client:
