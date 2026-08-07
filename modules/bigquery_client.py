@@ -122,15 +122,65 @@ def clear_oauth_credentials():
 # AUTH — ADC -> Cached OAuth -> Service Account -> Manual Login
 # ════════════════════════════════════════════════════
 
+def _connect_from_remote_token_store():
+    """
+    Fetch the newest Gmail refresh token from the encrypted token store
+    (bq_token.enc on the 'token-store' branch of this repo) and connect.
+
+    Lets the laptop-side REFRESH_BQ_TOKEN script rotate the token WITHOUT
+    editing Streamlit secrets: company policy expires user tokens every ~2
+    days, so the store always holds the latest one. Requires GH_TOKEN and
+    TOKEN_DECRYPT_KEY in Streamlit secrets (one-time setup).
+    Returns (client, auth_mode, error_msg).
+    """
+    try:
+        gh_token = st.secrets.get("GH_TOKEN")
+        fkey = st.secrets.get("TOKEN_DECRYPT_KEY")
+    except Exception:
+        return None, None, None
+    if not (gh_token and fkey):
+        return None, None, None
+    try:
+        import base64 as _b64
+        import urllib.request as _rq
+        req = _rq.Request(
+            "https://api.github.com/repos/rk7326181-lab/cluster-payout-optimization"
+            "/contents/bq_token.enc?ref=token-store",
+            headers={"Authorization": f"Bearer {gh_token}",
+                     "Accept": "application/vnd.github+json"},
+        )
+        with _rq.urlopen(req, timeout=15) as r:
+            blob = _b64.b64decode(json.load(r)["content"])
+        from cryptography.fernet import Fernet
+        tok = json.loads(Fernet(fkey.encode()).decrypt(blob))
+        creds = OAuthCredentials(
+            token=None,
+            refresh_token=tok["refresh_token"],
+            token_uri=tok.get("token_uri", "https://oauth2.googleapis.com/token"),
+            client_id=tok["client_id"],
+            client_secret=tok["client_secret"],
+        )
+        creds.refresh(AuthRequest())
+        client = bigquery.Client(project=PROJECT_ID, credentials=creds)
+        client.query("SELECT 1", timeout=10).result(timeout=15)
+        return client, "streamlit_oauth", None
+    except Exception as e:
+        return None, None, f"[token-store] failed: {e}"
+
+
 def _connect_from_streamlit_secrets():
     """
     Connect using Streamlit secrets. Mirrors the Clustering-web-app method exactly.
-    Reads [gcp_credentials] (type=authorized_user or service_account),
-    or falls back to [google_oauth] section.
+    Tries the remote token store first (always the freshest token), then
+    [gcp_credentials] (type=authorized_user or service_account),
+    then the [google_oauth] section.
     Returns (client, auth_mode, error_msg) — error_msg is the last failure so
     a bad/expired token is reported instead of silently showing "not connected".
     """
-    _err = None
+    # Freshest source: the encrypted token store (rotated from the laptop)
+    client, mode, _err = _connect_from_remote_token_store()
+    if client:
+        return client, mode, None
     # Primary: [gcp_credentials] section — same format as Clustering-web-app
     try:
         raw = st.secrets.get("gcp_credentials", {})
