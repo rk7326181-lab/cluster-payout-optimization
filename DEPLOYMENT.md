@@ -17,7 +17,105 @@ Before deploying, ensure:
 
 ---
 
-## 🌐 Deployment Options
+## 🏠 Current Production Setup: Self-Hosted via Tailscale (Private)
+
+This app runs on a dedicated Windows PC/server on your own network and is
+reachable **only** over a private [Tailscale](https://tailscale.com) network —
+no public port-forwarding, no cloud hosting. It runs alongside its sibling
+repo on the same server:
+
+| App | Repo | Port |
+|---|---|---|
+| cluster-payout-optimization (this repo) | Cluster Optimizer | **8502** |
+| Clustering-web-app | Geo Intelligence Portal | 8501 |
+
+See that repo's own `DEPLOYMENT.md` for its setup — the steps below only
+cover this repo. Do both once each; they don't interfere with each other.
+
+### 1. One-time server setup
+
+Prerequisites: **Python 3.11** and **Git** on the dedicated Windows PC.
+
+```powershell
+git clone https://github.com/rk7326181-lab/cluster-payout-optimization.git
+cd cluster-payout-optimization
+
+python -m venv venv
+venv\Scripts\pip install --upgrade pip
+venv\Scripts\pip install -r requirements.txt
+```
+
+Secrets (never committed — `.streamlit\secrets.toml` and `.env` are both
+already in `.gitignore`):
+
+```powershell
+Copy-Item .streamlit\secrets.toml.example .streamlit\secrets.toml
+notepad .streamlit\secrets.toml   # fill in [users] login + BigQuery credentials
+
+Copy-Item .env.example .env
+notepad .env                      # fill in GROQ_API_KEY for GANDALF AI
+```
+
+BigQuery: either `[google_oauth]` (personal Gmail token — expires every ~2
+days under this workspace's session policy; re-run `python generate_bq_token.py`
+when it does) or `[gcp_credentials]` (a service account key — doesn't
+expire; ask the BI/GCP team for one).
+
+### 2. Install Tailscale and join the private network
+
+```powershell
+# On the server, after installing Tailscale for Windows
+# (https://tailscale.com/download/windows):
+tailscale up
+tailscale ip -4     # note this machine's address, or use its MagicDNS name
+```
+
+Every teammate's device that needs access installs Tailscale and joins the
+same tailnet — a device outside the tailnet cannot reach the server at all.
+Optionally scope down which tailnet users/devices may connect via ACLs at
+https://login.tailscale.com/admin/acls (see Clustering-web-app's
+`DEPLOYMENT.md` for a worked ACL example covering both apps' ports).
+
+Extra layer — restrict this port to Tailscale devices only, on top of
+Tailscale's own authentication (run once, as Administrator):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\deploy\Setup-Firewall.ps1
+```
+
+### 3. Start / stop / restart / status
+
+| Action | Double-click | Command |
+|---|---|---|
+| Start | `deploy\Start-App.bat` | `powershell -ExecutionPolicy Bypass -File deploy\start.ps1` |
+| Stop | `deploy\Stop-App.bat` | `powershell -ExecutionPolicy Bypass -File deploy\stop.ps1` |
+| Restart | `deploy\Restart-App.bat` | `powershell -ExecutionPolicy Bypass -File deploy\restart.ps1` |
+| Status | `deploy\Status-App.bat` | `powershell -ExecutionPolicy Bypass -File deploy\status.ps1` |
+
+Runs as a background process; logs land in `deploy\logs\`; refuses to
+double-start; any team member with server access can run these same
+commands. See Clustering-web-app's `DEPLOYMENT.md` for full details (identical
+mechanism, different port).
+
+### 4. Access the app
+
+- From the server: `http://localhost:8502`
+- Remotely, from any tailnet device: `http://<tailscale-ip-or-magicdns-name>:8502`
+
+### 5. Updating later
+
+```powershell
+git pull
+venv\Scripts\pip install -r requirements.txt   # only if requirements changed
+deploy\Restart-App.bat
+```
+
+---
+
+## 🌐 Other Deployment Options (reference / not currently used)
+
+The options below were evaluated earlier in the project. The app currently
+runs self-hosted via Tailscale (above) — kept here for reference only.
 
 ### Option 1: Streamlit Cloud (Easiest - Free)
 

@@ -87,6 +87,9 @@ streamlit_log.txt
 *.log
 logs/
 
+# Self-hosted deployment runtime (PIDs) — see deploy/
+deploy/run/
+
 # Streamlit
 .streamlit/secrets.toml
 

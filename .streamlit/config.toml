@@ -7,6 +7,13 @@ font = "sans serif"
 
 [server]
 headless = true
+# Self-hosted deployment (Tailscale): bind all interfaces so the Tailscale
+# network can reach this app. Do NOT port-forward this port on your router —
+# access is intended to be private, via Tailscale only. See DEPLOYMENT.md.
+# Port 8502 (Clustering-web-app uses 8501) so both apps run simultaneously
+# on the same server without conflict.
+address = "0.0.0.0"
+port = 8502
 
 [browser]
 gatherUsageStats = false

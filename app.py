@@ -11,6 +11,12 @@ from datetime import datetime
 import sys, os, time, base64
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 sys.path.append(str(Path(__file__).parent / "modules"))
 
 from data_loader import DataLoader
