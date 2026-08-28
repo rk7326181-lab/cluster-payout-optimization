@@ -7,13 +7,14 @@ font = "sans serif"
 
 [server]
 headless = true
-# Self-hosted deployment (Tailscale): bind all interfaces so the Tailscale
-# network can reach this app. Do NOT port-forward this port on your router —
-# access is intended to be private, via Tailscale only. See DEPLOYMENT.md.
-# Port 8502 (Clustering-web-app uses 8501) so both apps run simultaneously
-# on the same server without conflict.
-address = "0.0.0.0"
-port = 8502
+# IMPORTANT: do NOT set server.address / server.port here. Streamlit
+# Community Cloud manages its own port and reverse-proxy binding, and a
+# hardcoded custom port in this file breaks the Cloud deployment outright
+# ("Oh no. Error running app.") — this is what happened when 8502 was
+# added here. For self-hosted/Tailscale deployment, deploy\start.ps1
+# already passes --server.address=0.0.0.0 --server.port=8502 explicitly
+# on the command line, which overrides this file — no config.toml change
+# is needed or safe for that. See DEPLOYMENT.md.
 
 [browser]
 gatherUsageStats = false
