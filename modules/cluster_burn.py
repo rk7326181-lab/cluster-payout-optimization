@@ -64,11 +64,91 @@ class ClusterBurnCalculator:
         """).to_dataframe(create_bqstorage_client=False)
 
     # ── AWB query ─────────────────────────────────────────────────────────────
+
+    # Server-side ceiling for the AWB job. It is the most expensive query in the
+    # app — two scans of data_engine_orderleveldata over days_back, three joins
+    # and two window functions, with no LIMIT — so bound it rather than letting
+    # it inherit "wait forever". Deliberately no maximum_bytes_billed: a cost cap
+    # here would turn a slow-but-working query into a hard failure, which is not
+    # the problem being fixed.
+    AWB_JOB_TIMEOUT_MS = 30 * 60 * 1000       # 30 min
+
+    @staticmethod
+    def _awb_job_config():
+        from google.cloud import bigquery
+        return bigquery.QueryJobConfig(
+            priority=bigquery.QueryPriority.INTERACTIVE,
+            job_timeout_ms=ClusterBurnCalculator.AWB_JOB_TIMEOUT_MS,
+            use_query_cache=True,
+            labels={"app": "cluster-payout", "step": "awb-burn"},
+        )
+
+    @staticmethod
+    def _explain_bq_error(exc) -> str:
+        """Turn a raw BigQuery exception into something the operator can act on."""
+        msg = str(exc)
+        if "was cancelled" in msg or "User requested cancellation" in msg or "499" in msg:
+            return (
+                "The BigQuery job was cancelled before it finished. This usually means the "
+                "page reran (a widget changed, the tab was reloaded, or the app restarted) "
+                "while the query was still running, which tears down the request and cancels "
+                "the job. Press the button again and leave the tab alone while it runs — the "
+                "app now reattaches to an in-flight job instead of starting a new one.\n\n"
+                f"Original error: {msg}"
+            )
+        if "jobTimeout" in msg or "Job timed out" in msg:
+            return (
+                "The query hit the "
+                f"{ClusterBurnCalculator.AWB_JOB_TIMEOUT_MS // 60000}-minute limit. "
+                "Reduce the day range or select fewer hubs.\n\n"
+                f"Original error: {msg}"
+            )
+        return msg
+
+    @staticmethod
+    def await_awb_job(client, job, progress_cb=None) -> Tuple[pd.DataFrame, Optional[str]]:
+        """
+        Wait for an already-submitted AWB job and download it.
+
+        Polls in short slices via job.reload() instead of making one long
+        blocking call. The blocking form is what allowed a Streamlit rerun to
+        tear down the script thread mid-flight, cancelling the job and
+        surfacing as `499 ... Job execution was cancelled: User requested
+        cancellation`. Short slices also keep the spinner responsive and let
+        the caller reattach to this job by id after a rerun.
+        """
+        import time
+
+        poll, waited = 1.5, 0.0
+        try:
+            while True:
+                job.reload()
+                if job.state == "DONE":
+                    break
+                if progress_cb:
+                    scanned = job.total_bytes_processed
+                    detail = f" • {scanned / 1024 ** 3:.1f} GB scanned" if scanned else ""
+                    progress_cb(f"{job.state.title()}{detail} • {waited:.0f}s elapsed")
+                time.sleep(poll)
+                waited += poll
+                if waited > 30:                      # back off once it's clearly a long job
+                    poll = min(poll + 0.5, 5.0)
+
+            if job.error_result:
+                return pd.DataFrame(), ClusterBurnCalculator._explain_bq_error(
+                    job.error_result.get("message", job.error_result)
+                )
+            return job.to_dataframe(create_bqstorage_client=False), None
+        except Exception as exc:
+            return pd.DataFrame(), ClusterBurnCalculator._explain_bq_error(exc)
+
     @staticmethod
     def fetch_awb(
         client,
         hub_ids: List[int],
         days_back: int,
+        on_submit=None,
+        progress_cb=None,
     ) -> Tuple[pd.DataFrame, Optional[str]]:
         ids_str = ", ".join(str(i) for i in hub_ids)
         query = f"""
@@ -127,10 +207,19 @@ class ClusterBurnCalculator:
         LEFT JOIN `{DATA_PROJECT}.ecommerce.ecommerce_hub` eh ON ad.hub_id = eh.id
         """
         try:
-            df = client.query(query).to_dataframe(create_bqstorage_client=False)
-            return df, None
+            job = client.query(query, job_config=ClusterBurnCalculator._awb_job_config())
         except Exception as exc:
-            return pd.DataFrame(), str(exc)
+            return pd.DataFrame(), ClusterBurnCalculator._explain_bq_error(exc)
+
+        # Hand the job id back before we start waiting, so a rerun that happens
+        # mid-query can reattach to this job instead of orphaning it.
+        if on_submit:
+            try:
+                on_submit(job.job_id, job.location)
+            except Exception:
+                pass
+
+        return ClusterBurnCalculator.await_awb_job(client, job, progress_cb)
 
     # ── CSV loaders ───────────────────────────────────────────────────────────
     @staticmethod
@@ -590,17 +679,51 @@ def render_burn_tab(bq_client=None):
         else ""
     )
 
-    if st.button(
+    # If a previous run submitted a job and the page reran before it finished,
+    # pick that job back up instead of firing a second copy of a very expensive
+    # query (and instead of leaving the first one to be cancelled).
+    _inflight = st.session_state.get("burn_awb_job")
+
+    clicked = st.button(
         "▶  Fetch AWB & Calculate Burn (both CSVs)",
         key="burn_run_btn",
         type="primary",
         disabled=run_disabled,
         use_container_width=False,
         help=run_tip or "Fetch AWB data and compute P&L for both CSVs",
-    ):
+    )
+
+    if clicked or _inflight:
+        def _remember_job(job_id, location):
+            st.session_state["burn_awb_job"] = {"job_id": job_id, "location": location}
+
+        spin = st.spinner(
+            f"Fetching AWB data for {len(selected_ids)} hub(s), last {int(days_back)} days… "
+            "keep this tab open — the query runs server-side and can take several minutes."
+        )
+
         # 4a. Fetch AWB
-        with st.spinner(f"Fetching AWB data for {len(selected_ids)} hub(s), last {int(days_back)} days…"):
-            awb_df, err = calc.fetch_awb(bq_client, selected_ids, int(days_back))
+        with spin:
+            if _inflight and not clicked:
+                try:
+                    job = bq_client.get_job(
+                        _inflight["job_id"], location=_inflight.get("location")
+                    )
+                    awb_df, err = calc.await_awb_job(bq_client, job)
+                except Exception:
+                    # Job id no longer resolvable (expired, or client re-auth'd) —
+                    # fall back to a fresh submit rather than dead-ending.
+                    st.session_state.pop("burn_awb_job", None)
+                    awb_df, err = calc.fetch_awb(
+                        bq_client, selected_ids, int(days_back), on_submit=_remember_job
+                    )
+            else:
+                awb_df, err = calc.fetch_awb(
+                    bq_client, selected_ids, int(days_back), on_submit=_remember_job
+                )
+
+        # Job reached a terminal state either way — stop tracking it.
+        st.session_state.pop("burn_awb_job", None)
 
         if err:
             st.error(f"BigQuery error: {err}")
