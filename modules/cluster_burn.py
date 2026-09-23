@@ -241,6 +241,79 @@ class ClusterBurnCalculator:
         except Exception:
             return None
 
+    # Geometry types this tab can actually use. A cluster has to enclose area
+    # for the point-in-polygon assignment to mean anything.
+    _AREA_GEOMS = ("POLYGON", "MULTIPOLYGON")
+
+    @staticmethod
+    def _decode(raw: bytes) -> str:
+        """Bytes → text, tolerating the encodings these exports actually arrive in."""
+        for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+            try:
+                return raw.decode(enc)
+            except UnicodeDecodeError:
+                continue
+        return raw.decode("utf-8", errors="replace")
+
+    @staticmethod
+    def _read_cluster_csv(raw: bytes) -> Tuple[pd.DataFrame, list]:
+        """
+        Parse a WKT cluster CSV, tolerating rows carrying more fields than the header.
+
+        Google Earth writes a dropped pin as
+
+            "POINT (77.39309 28.59734)",28.59734, 77.39309,
+
+        where the name is a raw "lat, lon" pair whose comma is NOT quoted. That
+        row has 4 fields against a 3-field header, and pandas' C parser responds
+        by aborting the whole file:
+
+            ParserError: Error tokenizing data. C error: Expected 3 fields in
+            line 3, saw 4
+
+        One stray pin therefore took down every polygon in the upload. The WKT
+        itself is properly quoted, so nothing is really ambiguous — fall back to
+        the csv module and fold any surplus middle fields back into `name`.
+
+        Returns (df, notes) where notes records rows that needed repairing.
+        """
+        text = ClusterBurnCalculator._decode(raw)
+        notes: list = []
+
+        # Happy path first — keeps well-formed files on the fast C parser.
+        try:
+            return pd.read_csv(io.StringIO(text)), notes
+        except pd.errors.ParserError:
+            pass
+
+        import csv as _csv
+
+        rows = list(_csv.reader(io.StringIO(text)))
+        if not rows:
+            return pd.DataFrame(columns=["WKT", "name", "description"]), notes
+
+        header = [h.strip() for h in rows[0]]
+        width = len(header)
+        fixed = []
+        for i, row in enumerate(rows[1:], start=0):
+            if not any(str(c).strip() for c in row):
+                continue
+            if len(row) == width:
+                fixed.append(row)
+                continue
+            if len(row) > width and width >= 3:
+                # WKT is first and description last; everything between is the
+                # name, so rejoin the pieces the stray comma split apart.
+                merged = [row[0], ", ".join(c.strip() for c in row[1:-1]), row[-1]]
+                merged += [""] * (width - 3)
+                fixed.append(merged[:width])
+                notes.append((i, merged[1] or "?", f"Repaired ragged row ({len(row)} fields, header has {width})"))
+            else:
+                fixed.append(list(row) + [""] * (width - len(row)))
+                notes.append((i, (row[1] if len(row) > 1 else "?"), f"Padded short row ({len(row)} fields)"))
+
+        return pd.DataFrame(fixed, columns=header), notes
+
     @staticmethod
     def load_clusters(source) -> Tuple[list, list]:
         """Parse WKT polygon CSV. source = UploadedFile | path string | bytes | None.
@@ -249,8 +322,19 @@ class ClusterBurnCalculator:
         if raw is None:
             return [], []
 
-        df = pd.read_csv(io.BytesIO(raw))
-        clusters, skipped = [], []
+        try:
+            df, skipped = ClusterBurnCalculator._read_cluster_csv(raw)
+        except Exception as exc:
+            # Never let a bad upload escape as a raw traceback — the caller
+            # renders `skipped` and can tell the user what to fix.
+            return [], [(0, "—", f"Could not read CSV: {exc}")]
+
+        missing = [c for c in ("WKT", "name", "description") if c not in df.columns]
+        if missing:
+            return [], [(0, "—", f"CSV is missing required column(s): {', '.join(missing)}. "
+                                 f"Found: {', '.join(map(str, df.columns))}")]
+
+        clusters = []
 
         for idx, row in df.iterrows():
             try:
@@ -259,6 +343,12 @@ class ClusterBurnCalculator:
                     skipped.append((idx, row["name"], "Empty polygon")); continue
                 if wkt_str.startswith("GEOMETRYCOLLECTION"):
                     skipped.append((idx, row["name"], "GeometryCollection not supported")); continue
+                if not wkt_str.upper().startswith(ClusterBurnCalculator._AREA_GEOMS):
+                    # POINT / LINESTRING — a pin or a path, not a cluster boundary.
+                    # It encloses no area, so it can never match an AWB point.
+                    kind = wkt_str.split("(", 1)[0].strip().upper() or "unknown"
+                    skipped.append((idx, row["name"], f"{kind} is not an area geometry — clusters must be POLYGON"))
+                    continue
                 polygon = load_wkt(wkt_str)
                 if polygon.is_empty:
                     skipped.append((idx, row["name"], "Empty after parse")); continue
@@ -279,8 +369,11 @@ class ClusterBurnCalculator:
         raw = ClusterBurnCalculator._to_bytes(uploaded_file)
         if raw is None:
             return DEFAULT_PINCODE_MAP.copy()
-        df = pd.read_csv(io.BytesIO(raw))
-        return dict(zip(df["pincode"].astype(int), df["description"].astype(str)))
+        try:
+            df = pd.read_csv(io.StringIO(ClusterBurnCalculator._decode(raw)))
+            return dict(zip(df["pincode"].astype(int), df["description"].astype(str)))
+        except Exception:
+            return DEFAULT_PINCODE_MAP.copy()
 
     # ── Cluster assignment ────────────────────────────────────────────────────
     @staticmethod
@@ -749,18 +842,29 @@ def render_burn_tab(bq_client=None):
         clusters1, skipped1 = _load_csv(live_file, "Live CSV #1", "Live5.csv")
         clusters2, skipped2 = _load_csv(live_file2, "Live CSV #2", None)
 
-        if not clusters1:
-            st.error("Live CSV #1 produced no usable polygons. Upload a valid WKT CSV.")
-            return
-        if not clusters2:
-            st.error("Live CSV #2 (live1.csv) is required for the comparison. Upload it and re-run.")
-            return
-
+        # Report per-row diagnostics BEFORE the emptiness checks below — when a
+        # file yields zero polygons these reasons are the only thing that tells
+        # the user what to fix, so they must not be stranded behind an early return.
         for label, skipped in (("Live CSV #1", skipped1), ("Live CSV #2", skipped2)):
             if skipped:
-                with st.expander(f"⚠ {len(skipped)} polygon row(s) skipped in {label}"):
+                with st.expander(f"⚠ {len(skipped)} row(s) skipped or repaired in {label}", expanded=not clusters1):
                     for s in skipped:
                         st.caption(f"Row {s[0]} | {s[1]} | {s[2]}")
+
+        if not clusters1:
+            st.error(
+                "Live CSV #1 produced no usable polygons. It needs the columns "
+                "`WKT,name,description`, with each WKT a POLYGON (a dropped pin/POINT "
+                "is not a cluster). Expand the panel above for the per-row reason."
+            )
+            return
+        if not clusters2:
+            st.error(
+                "Live CSV #2 (live1.csv) is required for the comparison and produced no "
+                "usable polygons. Upload it and re-run — expand the panel above for the "
+                "per-row reason."
+            )
+            return
 
         st.caption(f"Polygons loaded — CSV #1: **{len(clusters1)}**  ·  CSV #2: **{len(clusters2)}**")
 
